@@ -268,7 +268,7 @@ def generate_report_pdf(
     Returns raw PDF bytes.
     """
     from jinja2 import Template
-    from weasyprint import HTML
+    from xhtml2pdf import pisa
 
     open_snags = [s for s in snags if s["status"] == "open"]
     closed_snags = [s for s in snags if s["status"] == "closed"]
@@ -289,5 +289,7 @@ def generate_report_pdf(
         report_date=datetime.now().strftime("%d %b %Y"),
     )
 
-    pdf = HTML(string=html_content).write_pdf()
-    return pdf
+   from io import BytesIO
+    buffer = BytesIO()
+    pisa.CreatePDF(html_content, dest=buffer)
+    return buffer.getvalue()
