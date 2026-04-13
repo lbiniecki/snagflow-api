@@ -14,7 +14,6 @@ router = APIRouter()
 WHISPER_URL = "https://api.openai.com/v1/audio/transcriptions"
 MAX_AUDIO_MB = 25  # Whisper limit
 
-
 @router.post("/", response_model=TranscribeResponse)
 async def transcribe_audio(
     audio: UploadFile = File(...),
@@ -44,7 +43,6 @@ async def transcribe_audio(
                     files={"file": (audio.filename or f"audio{suffix}", f, audio.content_type or "audio/webm")},
                     data={
                         "model": "whisper-1",
-                        "language": "en",
                         "response_format": "verbose_json",
                     },
                 )
