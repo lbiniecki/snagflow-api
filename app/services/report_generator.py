@@ -102,6 +102,7 @@ class SiteVisitReport(FPDF):
         weather: str = "",
         attendees: str = "",
         access_notes: str = "",
+        company_name: str = "",
     ):
         super().__init__()
         self.project = project
@@ -111,6 +112,7 @@ class SiteVisitReport(FPDF):
         self.weather = weather
         self.attendees = attendees
         self.access_notes = access_notes
+        self.company_name = company_name
         self._logo_path: Optional[str] = None
         self._is_cover = False
 
@@ -238,7 +240,14 @@ class SiteVisitReport(FPDF):
                 y += 5
 
         # Push project info to mid-page
-        self.set_y(PAGE_H * 0.4)
+        self.set_y(PAGE_H * 0.35)
+
+        # Company name
+        if self.company_name:
+            self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 14)
+            self.set_text_color(*ORANGE)
+            self.cell(0, 8, self.company_name, ln=True)
+            self.ln(4)
 
         # Project name
         self.set_font("DejaVu" if self._use_unicode else "Helvetica", "", 24)
@@ -432,7 +441,7 @@ class SiteVisitReport(FPDF):
                 location = location[:27] + "..."
             date_str = snag.get("created_at", "")[:10] if snag.get("created_at") else ""
 
-            row = [str(idx + 1), note, location]
+            row = [str(snag.get("snag_no", idx + 1)), note, location]
             if show_priority:
                 row.append(snag.get("priority", "medium").upper())
             row.append(date_str)
@@ -485,23 +494,22 @@ class SiteVisitReport(FPDF):
 
     def _build_item_pages(self, photo_data: Dict[str, Any]):
         """
-        Build one page per snag item, matching the HP template layout:
-        65% photo column | 35% action/description column.
-        Up to 2 photos per item, stacked vertically with captions.
+        Build one page per snag item.
+        Shows ALL snags (open and closed) with status indicator.
+        Uses snag_no for fixed numbering. Supports up to 4 photos.
         """
         if not self.snags:
             return
 
-        open_snags = [s for s in self.snags if s.get("status") == "open"]
-        if not open_snags:
-            open_snags = self.snags
+        # Show ALL snags sorted by snag_no (fixed order)
+        all_snags = sorted(self.snags, key=lambda s: s.get("snag_no", 0))
 
-        for idx, snag in enumerate(open_snags):
+        for idx, snag in enumerate(all_snags):
             self.add_page()
 
             if idx == 0:
                 self._set_body(9)
-                self.cell(0, 6, "Summary of actions to be carried out by contractor:", ln=True)
+                self.cell(0, 6, "List of items requiring attention:", ln=True)
                 self.ln(2)
 
             photo_w = USABLE_W * 0.70
@@ -523,18 +531,24 @@ class SiteVisitReport(FPDF):
             self.set_y(hdr_y + hdr_h)
             y_content = self.get_y()
 
-            # ── Item number row ──
+            # ── Item number row (use fixed snag_no) ──
+            item_no = snag.get("snag_no", idx + 1)
+            is_closed = snag.get("status") == "closed"
+
             self.set_xy(MARGIN, y_content)
             self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 11)
             self.set_text_color(*BLACK)
             self.set_draw_color(*BORDER)
-            self.cell(photo_w, 8, f"{idx + 1:02d}", border="LR")
+            num_text = f"{item_no:02d}"
+            if is_closed:
+                num_text += "  [CLOSED]"
+            self.cell(photo_w, 8, num_text, border="LR")
             self.ln()
             sep_y = self.get_y()
             self.set_draw_color(*LIGHT_GREY)
             self.line(MARGIN + 2, sep_y, MARGIN + photo_w - 2, sep_y)
 
-            # ── Resolve photos ──
+            # ── Resolve photos (up to 4 per snag) ──
             snag_id = snag.get("id", "")
             raw = photo_data.get(snag_id)
             if raw is None:
@@ -542,67 +556,55 @@ class SiteVisitReport(FPDF):
             elif isinstance(raw, (bytes, bytearray)):
                 photos_list = [raw]
             elif isinstance(raw, list):
-                photos_list = raw[:2]
+                photos_list = raw[:4]  # max 4
             else:
                 photos_list = []
 
-            item_no = idx + 1
             n_photos = len(photos_list)
             photo_inner_w = photo_w - 8
-            caption_h = 5  # height for caption line
-            gap = 3         # gap between photos
+            caption_h = 5
+            gap = 3
 
-            # Available height for photos in the left column
-            # Page usable: from sep_y+2 to PAGE_H - 25 (footer margin)
+            # For >2 photos, we'll use 2 per page
+            photos_page1 = photos_list[:2]
+            photos_page2 = photos_list[2:4]
+
             avail_h = PAGE_H - 25 - (sep_y + 2)
-            if n_photos >= 2:
+            n_p1 = len(photos_page1)
+            if n_p1 >= 2:
                 max_per_photo = (avail_h - caption_h * 2 - gap) / 2
-            elif n_photos == 1:
+            elif n_p1 == 1:
                 max_per_photo = avail_h - caption_h
             else:
                 max_per_photo = 80
 
             cur_y = sep_y + 2
 
-            if photos_list:
-                for pi, p_bytes in enumerate(photos_list):
+            def _render_photos(photo_list, start_idx, cur_y, max_h):
+                for pi, p_bytes in enumerate(photo_list):
                     try:
                         tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
                         tmp.write(p_bytes)
                         tmp.flush()
-
-                        # Calculate exact rendered size
                         pw, ph = self._get_image_size(p_bytes)
-                        render_w, render_h = self._fit_dimensions(
-                            pw, ph, photo_inner_w, max_per_photo
-                        )
-
-                        # Center horizontally in column
+                        render_w, render_h = self._fit_dimensions(pw, ph, photo_inner_w, max_h)
                         img_x = MARGIN + 4 + (photo_inner_w - render_w) / 2
-
-                        self.image(
-                            tmp.name,
-                            x=img_x,
-                            y=cur_y,
-                            w=render_w,
-                            h=render_h,
-                        )
+                        self.image(tmp.name, x=img_x, y=cur_y, w=render_w, h=render_h)
                         img_bottom = cur_y + render_h
-
-                        # Caption right under the photo
                         self.set_xy(MARGIN, img_bottom + 1)
                         self.set_font("DejaVu" if self._use_unicode else "Helvetica", "I", 7.5)
                         self.set_text_color(*MID_GREY)
-                        self.cell(photo_w, caption_h, f"Photo {item_no}.{pi + 1}", align="C")
-
+                        self.cell(photo_w, caption_h, f"Photo {item_no}.{start_idx + pi + 1}", align="C")
                         cur_y = img_bottom + 1 + caption_h + gap
-
                     except Exception:
                         self.set_xy(MARGIN, cur_y)
                         self._set_muted(9)
-                        self.cell(photo_w, 40, f"[Photo {item_no}.{pi + 1} unavailable]", align="C")
+                        self.cell(photo_w, 40, f"[Photo {item_no}.{start_idx + pi + 1} unavailable]", align="C")
                         cur_y += 40 + gap
+                return cur_y
 
+            if photos_page1:
+                cur_y = _render_photos(photos_page1, 0, cur_y, max_per_photo)
                 self.set_y(cur_y)
             else:
                 self.set_xy(MARGIN, cur_y)
@@ -617,7 +619,6 @@ class SiteVisitReport(FPDF):
             self._set_body(9)
             action_text = snag.get("note", "[No description]")
 
-            # Write action text in the right column
             x_right = MARGIN + photo_w
             self.set_xy(x_right + 2, y_content + 2)
             self.set_font("DejaVu" if self._use_unicode else "Helvetica", "", 9)
@@ -638,6 +639,13 @@ class SiteVisitReport(FPDF):
             if date_str:
                 meta.append(f"Date: {date_str}")
 
+            # Status highlight for closed snags
+            if is_closed:
+                self.set_x(x_right + 2)
+                self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 8)
+                self.set_text_color(*GREEN)
+                self.cell(action_w - 4, 5, "CLOSED", ln=True)
+
             self.set_font("DejaVu" if self._use_unicode else "Helvetica", "", 7)
             self.set_text_color(*MID_GREY)
             for m in meta:
@@ -646,11 +654,23 @@ class SiteVisitReport(FPDF):
 
             text_bottom = self.get_y()
 
-            # ── Draw borders around both columns to the same bottom ──
+            # ── Draw borders ──
             bottom = max(photo_bottom, text_bottom) + 4
             self.set_draw_color(*BORDER)
             self.rect(MARGIN, y_content, photo_w, bottom - y_content)
             self.rect(MARGIN + photo_w, y_content, action_w, bottom - y_content)
+
+            # ── Overflow page for photos 3-4 ──
+            if photos_page2:
+                self.add_page()
+                self._set_body(9)
+                self.cell(0, 6, f"Item {item_no:02d} - continued", ln=True)
+                self.ln(2)
+                overflow_y = self.get_y()
+                overflow_avail = PAGE_H - 25 - overflow_y
+                n_p2 = len(photos_page2)
+                max_p2 = (overflow_avail - caption_h * n_p2 - gap) / max(n_p2, 1)
+                _render_photos(photos_page2, 2, overflow_y, max_p2)
 
     # ─── Closing Page ───────────────────────────────────────────
     def _build_closing(self):
@@ -714,23 +734,10 @@ def generate_report_pdf(
     weather: str = "",
     attendees: str = "",
     access_notes: str = "",
+    company_name: str = "",
 ) -> bytes:
     """
     Generate a professional site visit report PDF.
-
-    Args:
-        project:     Project dict (name, client, address, id)
-        snags:       List of snag dicts
-        inspector_email: Inspector name or email
-        logo_bytes:  Optional company logo image bytes (PNG/JPG)
-        photo_data:  Optional dict {snag_id: image_bytes} or {snag_id: [bytes, bytes]} for 1-2 photos
-        visit_no:    Optional visit number string
-        weather:     Optional weather conditions
-        attendees:   Optional attendees list
-        access_notes: Optional site access notes
-
-    Returns:
-        PDF file as bytes
     """
     report = SiteVisitReport(
         project=project,
@@ -741,5 +748,6 @@ def generate_report_pdf(
         weather=weather,
         attendees=attendees,
         access_notes=access_notes,
+        company_name=company_name,
     )
     return report.build(photo_data=photo_data)

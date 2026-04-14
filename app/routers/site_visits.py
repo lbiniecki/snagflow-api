@@ -143,6 +143,31 @@ async def close_visit(
     return result.data[0] if result.data else result.data
 
 
+@router.post("/{visit_id}/reopen")
+async def reopen_visit(
+    visit_id: str,
+    user: dict = Depends(get_current_user),
+):
+    """Reopen a closed site visit so new snags can be added."""
+    visit = (
+        supabase_admin.table("site_visits")
+        .select("*, projects!inner(user_id)")
+        .eq("id", visit_id)
+        .single()
+        .execute()
+    )
+    if not visit.data or visit.data.get("projects", {}).get("user_id") != user["id"]:
+        raise HTTPException(status_code=404, detail="Visit not found")
+
+    result = (
+        supabase_admin.table("site_visits")
+        .update({"status": "open"})
+        .eq("id", visit_id)
+        .execute()
+    )
+    return result.data[0] if result.data else result.data
+
+
 @router.delete("/{visit_id}")
 async def delete_visit(
     visit_id: str,

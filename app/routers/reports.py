@@ -67,6 +67,53 @@ async def _get_company_logo(user_id: str) -> bytes | None:
     return None
 
 
+async def _get_company_name(user_id: str) -> str:
+    """Get company name for the user."""
+    try:
+        company = (
+            supabase_admin.table("companies")
+            .select("name")
+            .eq("owner_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        if company.data:
+            return company.data[0].get("name", "")
+        mem = (
+            supabase_admin.table("company_members")
+            .select("companies(name)")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        if mem.data and mem.data[0].get("companies"):
+            return mem.data[0]["companies"].get("name", "")
+    except Exception:
+        pass
+    return ""
+
+
+async def _get_inspector_name(user_id: str) -> str:
+    """Get inspector's full name from profiles table."""
+    try:
+        profile = (
+            supabase_admin.table("profiles")
+            .select("first_name, last_name")
+            .eq("id", user_id)
+            .single()
+            .execute()
+        )
+        if profile.data:
+            first = profile.data.get("first_name", "")
+            last = profile.data.get("last_name", "")
+            full = f"{first} {last}".strip()
+            if full:
+                return full
+    except Exception:
+        pass
+    return ""
+
+
 @router.get("/{project_id}")
 async def get_report(
     project_id: str,
@@ -126,31 +173,54 @@ async def get_report(
 
     snags_res = query.execute()
 
-    # Generate signed URLs and download photo bytes
+    # Generate signed URLs and download photo bytes (up to 4 + rectification per snag)
     snags = []
-    photo_data: dict[str, bytes] = {}
+    photo_data: dict[str, list[bytes]] = {}
 
     for s in snags_res.data:
         photo_url = None
-        if include_photos and s.get("photo_path"):
-            try:
-                url_res = supabase_admin.storage.from_("snag-photos").create_signed_url(
-                    s["photo_path"], 300
-                )
-                photo_url = url_res.get("signedURL") or url_res.get("signedUrl")
-                if photo_url:
-                    img_bytes = await _download_photo(photo_url)
-                    if img_bytes:
-                        photo_data[s["id"]] = img_bytes
-            except Exception:
-                pass
+        if include_photos:
+            photos_for_snag = []
+            # Main photos (photo_path, photo_path_2, photo_path_3, photo_path_4)
+            for path_key in ["photo_path", "photo_path_2", "photo_path_3", "photo_path_4"]:
+                path = s.get(path_key)
+                if path:
+                    try:
+                        url_res = supabase_admin.storage.from_("snag-photos").create_signed_url(path, 300)
+                        url = url_res.get("signedURL") or url_res.get("signedUrl")
+                        if not photo_url and path_key == "photo_path":
+                            photo_url = url
+                        if url:
+                            img_bytes = await _download_photo(url)
+                            if img_bytes:
+                                photos_for_snag.append(img_bytes)
+                    except Exception:
+                        pass
+
+            # Rectification photo for closed snags
+            rect_path = s.get("rectification_photo_path")
+            if rect_path:
+                try:
+                    url_res = supabase_admin.storage.from_("snag-photos").create_signed_url(rect_path, 300)
+                    url = url_res.get("signedURL") or url_res.get("signedUrl")
+                    if url:
+                        img_bytes = await _download_photo(url)
+                        if img_bytes:
+                            photos_for_snag.append(img_bytes)
+                except Exception:
+                    pass
+
+            if photos_for_snag:
+                photo_data[s["id"]] = photos_for_snag
+
         snags.append({**s, "photo_url": photo_url})
 
-    # Fetch company logo
+    # Fetch company logo and name
     logo_bytes = await _get_company_logo(user["id"])
+    company_name = await _get_company_name(user["id"])
 
-    # Build inspector name
-    inspector = user.get("email", "")
+    # Build inspector name — prefer profile first/last name over email
+    inspector = await _get_inspector_name(user["id"]) or user.get("email", "")
     if visit_data:
         inspector = visit_data.get("inspector", "") or inspector
 
@@ -165,6 +235,7 @@ async def get_report(
         visit_no=visit_no,
         attendees=visit_data.get("attendees", "") if visit_data else "",
         access_notes=visit_data.get("access_notes", "") if visit_data else "",
+        company_name=company_name,
     )
 
     # Return as downloadable PDF
