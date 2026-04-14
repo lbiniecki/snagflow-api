@@ -443,19 +443,27 @@ class SiteVisitReport(FPDF):
             col_w = [10, 80, 45, 25, 20]
             headers = ["#", "Description", "Location", "Date", "Status"]
 
-        for i, h in enumerate(headers):
-            self._table_header_cell(col_w[i], h)
-        self.ln()
+        def _draw_header():
+            y = self.get_y()
+            for i, h in enumerate(headers):
+                x = MARGIN + sum(col_w[:i])
+                self.set_xy(x, y)
+                self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 8)
+                self.set_fill_color(*HEADER_GREY)
+                self.set_text_color(*DARK)
+                self.set_draw_color(*BORDER)
+                self.rect(x, y, col_w[i], 7, "DF")
+                self.set_xy(x + 1, y + 0.5)
+                self.cell(col_w[i] - 2, 6, h)
+            self.set_y(y + 7)
 
-        self._set_body(8)
-        line_h = 4  # line height for wrapped text
+        _draw_header()
+        line_h = 4
 
         for idx, snag in enumerate(snags_list):
             if self.get_y() > PAGE_H - 35:
                 self.add_page()
-                for i, h in enumerate(headers):
-                    self._table_header_cell(col_w[i], h)
-                self.ln()
+                _draw_header()
 
             note = snag.get("note", "")
             location = snag.get("location", "-") or "-"
@@ -467,31 +475,30 @@ class SiteVisitReport(FPDF):
             row.append(date_str)
             row.append(snag.get("status", "").upper())
 
-            # Calculate row height based on longest wrapped text
+            # Calculate row height
             self.set_font("DejaVu" if self._use_unicode else "Helvetica", "", 8)
-            desc_lines = max(1, self.get_string_width(note) / (col_w[1] - 2) + 1)
-            loc_lines = max(1, self.get_string_width(location) / (col_w[2] - 2) + 1)
-            row_h = max(6, int(max(desc_lines, loc_lines) * line_h))
+            desc_lines = max(1, int(self.get_string_width(note) / max(col_w[1] - 4, 1)) + 1)
+            loc_lines = max(1, int(self.get_string_width(location) / max(col_w[2] - 4, 1)) + 1)
+            row_h = max(7, int(max(desc_lines, loc_lines) * line_h) + 2)
 
-            y_start = self.get_y()
+            y_row = self.get_y()
+
             for i, val in enumerate(row):
-                x = self.get_x() if i > 0 else MARGIN
-                self.set_xy(sum(col_w[:i]) + MARGIN, y_start)
+                x = MARGIN + sum(col_w[:i])
+                # Draw cell border
+                self.set_draw_color(*BORDER)
+                self.rect(x, y_row, col_w[i], row_h)
+                # Write text inside
+                self.set_xy(x + 1, y_row + 1)
                 self.set_font("DejaVu" if self._use_unicode else "Helvetica", "", 8)
                 self.set_text_color(*BLACK)
-                self.set_draw_color(*BORDER)
-                # For description and location columns, use multi_cell for wrapping
                 if i in (1, 2):
-                    x_pos = sum(col_w[:i]) + MARGIN
-                    self.set_xy(x_pos, y_start)
-                    self.rect(x_pos, y_start, col_w[i], row_h)
-                    self.set_xy(x_pos + 1, y_start + 0.5)
+                    # Wrapping columns
                     self.multi_cell(col_w[i] - 2, line_h, val)
                 else:
-                    self.set_xy(sum(col_w[:i]) + MARGIN, y_start)
-                    self.cell(col_w[i], row_h, val, border=1, align="L" if i > 0 else "C")
+                    self.cell(col_w[i] - 2, row_h - 2, val)
 
-            self.set_y(y_start + row_h)
+            self.set_y(y_row + row_h)
 
     # ─── Item Pages (with photos) ───────────────────────────────
     @staticmethod
@@ -554,8 +561,8 @@ class SiteVisitReport(FPDF):
                 self.cell(0, 6, "List of items requiring attention:", ln=True)
                 self.ln(2)
 
-            photo_w = USABLE_W * 0.70
-            action_w = USABLE_W * 0.30
+            photo_w = USABLE_W * 0.62
+            action_w = USABLE_W * 0.38
 
             # ── Header row ──
             hdr_y = self.get_y()
@@ -624,6 +631,7 @@ class SiteVisitReport(FPDF):
 
             def _render_photos(photo_list, start_idx, cur_y, max_h):
                 for pi, p_bytes in enumerate(photo_list):
+                    rendered = False
                     try:
                         tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
                         tmp.write(p_bytes)
@@ -631,26 +639,24 @@ class SiteVisitReport(FPDF):
                         pw, ph = self._get_image_size(p_bytes)
                         render_w, render_h = self._fit_dimensions(pw, ph, photo_inner_w, max_h)
                         img_x = MARGIN + 4 + (photo_inner_w - render_w) / 2
-
-                        # Draw border frame around photo
-                        self.set_draw_color(*BORDER)
-                        self.set_line_width(0.3)
-                        self.rect(img_x - 1, cur_y - 1, render_w + 2, render_h + 2)
-
                         self.image(tmp.name, x=img_x, y=cur_y, w=render_w, h=render_h)
                         img_bottom = cur_y + render_h
-
+                        rendered = True
                         # Caption under photo
-                        self.set_xy(MARGIN, img_bottom + 2)
+                        self.set_xy(MARGIN, img_bottom + 1)
                         self.set_font("DejaVu" if self._use_unicode else "Helvetica", "I", 7.5)
                         self.set_text_color(*MID_GREY)
                         self.cell(photo_w, caption_h, f"Photo {item_no}.{start_idx + pi + 1}", align="C")
-                        cur_y = img_bottom + 2 + caption_h + gap
-                    except Exception as e:
-                        self.set_xy(MARGIN, cur_y)
-                        self._set_muted(9)
-                        self.cell(photo_w, 20, f"[Photo {item_no}.{start_idx + pi + 1} unavailable]", align="C")
-                        cur_y += 20 + gap
+                        cur_y = img_bottom + 1 + caption_h + gap
+                    except Exception:
+                        if not rendered:
+                            self.set_xy(MARGIN, cur_y)
+                            self._set_muted(9)
+                            self.cell(photo_w, 20, f"[Photo {item_no}.{start_idx + pi + 1} unavailable]", align="C")
+                            cur_y += 20 + gap
+                        else:
+                            # Photo rendered but caption failed — just skip caption
+                            cur_y = cur_y + max_h + gap
                 return cur_y
 
             if photos_page1:
