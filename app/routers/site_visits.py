@@ -20,6 +20,7 @@ class CreateVisit(BaseModel):
     checker: str = ""
     reviewer: str = ""
     approver: str = ""
+    closing_notes: str = ""
 
 
 class UpdateVisit(BaseModel):
@@ -31,6 +32,7 @@ class UpdateVisit(BaseModel):
     checker: Optional[str] = None
     reviewer: Optional[str] = None
     approver: Optional[str] = None
+    closing_notes: Optional[str] = None
 
 
 @router.get("/")
@@ -90,6 +92,7 @@ async def create_visit(
             "checker": body.checker,
             "reviewer": body.reviewer,
             "approver": body.approver,
+            "closing_notes": body.closing_notes,
         })
         .execute()
     )

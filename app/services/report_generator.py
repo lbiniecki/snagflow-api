@@ -106,6 +106,7 @@ class SiteVisitReport(FPDF):
         checker: str = "",
         reviewer: str = "",
         approver: str = "",
+        closing_notes: str = "",
     ):
         super().__init__()
         self.project = project
@@ -119,8 +120,18 @@ class SiteVisitReport(FPDF):
         self.checker = checker
         self.reviewer = reviewer
         self.approver = approver
+        self.closing_notes = closing_notes or (
+            "If requested, notice must be given to allow for a site visit "
+            "to review prior to closing up or concealing the item of works.\n\n"
+            "The contractor is to confirm that the above actions have been carried out "
+            "and provide photographic record of the associated works. The contractor is "
+            "to sign the items as closed and e-mail to originator."
+        )
         self._logo_path: Optional[str] = None
         self._is_cover = False
+        # Document reference: custom or auto-generated
+        p_name = project.get("name", "")[:3].upper()
+        self.doc_ref = f"{p_name}-SV{self.visit_no.zfill(2)}"
 
         self.set_auto_page_break(auto=True, margin=25)
 
@@ -186,8 +197,7 @@ class SiteVisitReport(FPDF):
         self.set_font("DejaVu" if self._use_unicode else "Helvetica", "", 7)
         self.set_text_color(*MID_GREY)
         p_code = self.project.get("name", "")
-        p_id = self.project.get("id", "")[:8].upper()
-        left = f"{p_code}  |  Ref: VS-{p_id}"
+        left = f"{p_code}  |  Ref: {self.doc_ref}"
         self.cell(USABLE_W / 3, 5, left, align="L")
         self.cell(USABLE_W / 3, 5, f"Site visit No {self.visit_no}", align="C")
         self.cell(USABLE_W / 3, 5, f"{self.page_no()}", align="R")
@@ -271,6 +281,11 @@ class SiteVisitReport(FPDF):
         self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 14)
         self.set_text_color(*DARK)
         self.cell(0, 8, f"Site visit No. {self.visit_no}  |  Issue No. {self.visit_no}", ln=True)
+        self.ln(2)
+
+        # Document reference
+        self._set_muted(11)
+        self.cell(0, 6, f"Document Ref: {self.doc_ref}", ln=True)
         self.ln(4)
 
         # Client + date
@@ -312,7 +327,9 @@ class SiteVisitReport(FPDF):
         self._table_cell(c2, datetime.now().strftime("%d/%m/%Y"), h=10)
         self.ln()
         self._table_cell(c1, "Reason:", h=10, bold=True, fill=True)
-        self._table_cell(c1 + c2 + c2, "Site Inspection", h=10)
+        self._table_cell(c2, "Site Inspection", h=10)
+        self._table_cell(c1, "Doc Ref:", h=10, bold=True, fill=True)
+        self._table_cell(c2 - c1, self.doc_ref, h=10)
         self.ln()
 
         # ── Sign-off table ──
@@ -431,20 +448,17 @@ class SiteVisitReport(FPDF):
         self.ln()
 
         self._set_body(8)
+        line_h = 4  # line height for wrapped text
+
         for idx, snag in enumerate(snags_list):
-            # Check if we need a new page
-            if self.get_y() > PAGE_H - 30:
+            if self.get_y() > PAGE_H - 35:
                 self.add_page()
                 for i, h in enumerate(headers):
                     self._table_header_cell(col_w[i], h)
                 self.ln()
 
             note = snag.get("note", "")
-            if len(note) > 55:
-                note = note[:52] + "..."
             location = snag.get("location", "-") or "-"
-            if len(location) > 30:
-                location = location[:27] + "..."
             date_str = snag.get("created_at", "")[:10] if snag.get("created_at") else ""
 
             row = [str(idx + 1), note, location]
@@ -453,9 +467,31 @@ class SiteVisitReport(FPDF):
             row.append(date_str)
             row.append(snag.get("status", "").upper())
 
+            # Calculate row height based on longest wrapped text
+            self.set_font("DejaVu" if self._use_unicode else "Helvetica", "", 8)
+            desc_lines = max(1, self.get_string_width(note) / (col_w[1] - 2) + 1)
+            loc_lines = max(1, self.get_string_width(location) / (col_w[2] - 2) + 1)
+            row_h = max(6, int(max(desc_lines, loc_lines) * line_h))
+
+            y_start = self.get_y()
             for i, val in enumerate(row):
-                self._table_cell(col_w[i], val)
-            self.ln()
+                x = self.get_x() if i > 0 else MARGIN
+                self.set_xy(sum(col_w[:i]) + MARGIN, y_start)
+                self.set_font("DejaVu" if self._use_unicode else "Helvetica", "", 8)
+                self.set_text_color(*BLACK)
+                self.set_draw_color(*BORDER)
+                # For description and location columns, use multi_cell for wrapping
+                if i in (1, 2):
+                    x_pos = sum(col_w[:i]) + MARGIN
+                    self.set_xy(x_pos, y_start)
+                    self.rect(x_pos, y_start, col_w[i], row_h)
+                    self.set_xy(x_pos + 1, y_start + 0.5)
+                    self.multi_cell(col_w[i] - 2, line_h, val)
+                else:
+                    self.set_xy(sum(col_w[:i]) + MARGIN, y_start)
+                    self.cell(col_w[i], row_h, val, border=1, align="L" if i > 0 else "C")
+
+            self.set_y(y_start + row_h)
 
     # ─── Item Pages (with photos) ───────────────────────────────
     @staticmethod
@@ -595,18 +631,26 @@ class SiteVisitReport(FPDF):
                         pw, ph = self._get_image_size(p_bytes)
                         render_w, render_h = self._fit_dimensions(pw, ph, photo_inner_w, max_h)
                         img_x = MARGIN + 4 + (photo_inner_w - render_w) / 2
+
+                        # Draw border frame around photo
+                        self.set_draw_color(*BORDER)
+                        self.set_line_width(0.3)
+                        self.rect(img_x - 1, cur_y - 1, render_w + 2, render_h + 2)
+
                         self.image(tmp.name, x=img_x, y=cur_y, w=render_w, h=render_h)
                         img_bottom = cur_y + render_h
-                        self.set_xy(MARGIN, img_bottom + 1)
+
+                        # Caption under photo
+                        self.set_xy(MARGIN, img_bottom + 2)
                         self.set_font("DejaVu" if self._use_unicode else "Helvetica", "I", 7.5)
                         self.set_text_color(*MID_GREY)
                         self.cell(photo_w, caption_h, f"Photo {item_no}.{start_idx + pi + 1}", align="C")
-                        cur_y = img_bottom + 1 + caption_h + gap
-                    except Exception:
+                        cur_y = img_bottom + 2 + caption_h + gap
+                    except Exception as e:
                         self.set_xy(MARGIN, cur_y)
                         self._set_muted(9)
-                        self.cell(photo_w, 40, f"[Photo {item_no}.{start_idx + pi + 1} unavailable]", align="C")
-                        cur_y += 40 + gap
+                        self.cell(photo_w, 20, f"[Photo {item_no}.{start_idx + pi + 1} unavailable]", align="C")
+                        cur_y += 20 + gap
                 return cur_y
 
             if photos_page1:
@@ -684,18 +728,7 @@ class SiteVisitReport(FPDF):
         self.ln(10)
         self._set_body(9)
 
-        self.multi_cell(
-            USABLE_W, 5,
-            "• If requested, notice must be given to allow for a site visit "
-            "to review prior to closing up or concealing the item of works."
-        )
-        self.ln(4)
-        self.multi_cell(
-            USABLE_W, 5,
-            "The contractor is to confirm that the above actions have been carried out "
-            "and provide photographic record of the associated works. The contractor is "
-            "to sign the items as closed and e-mail to originator."
-        )
+        self.multi_cell(USABLE_W, 5, self.closing_notes)
         self.ln(8)
         self._set_body(10)
         self.cell(0, 6, "Signed:", ln=True)
@@ -745,6 +778,7 @@ def generate_report_pdf(
     checker: str = "",
     reviewer: str = "",
     approver: str = "",
+    closing_notes: str = "",
 ) -> bytes:
     """
     Generate a professional site visit report PDF.
@@ -762,5 +796,6 @@ def generate_report_pdf(
         checker=checker,
         reviewer=reviewer,
         approver=approver,
+        closing_notes=closing_notes,
     )
     return report.build(photo_data=photo_data)

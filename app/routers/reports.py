@@ -238,6 +238,7 @@ async def get_report(
         checker=visit_data.get("checker", "") if visit_data else "",
         reviewer=visit_data.get("reviewer", "") if visit_data else "",
         approver=visit_data.get("approver", "") if visit_data else "",
+        closing_notes=visit_data.get("closing_notes", "") if visit_data else "",
     )
 
     # Return as downloadable PDF
