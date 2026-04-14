@@ -219,10 +219,9 @@ async def get_report(
     logo_bytes = await _get_company_logo(user["id"])
     company_name = await _get_company_name(user["id"])
 
-    # Build inspector name — prefer profile first/last name over email
-    inspector = await _get_inspector_name(user["id"]) or user.get("email", "")
-    if visit_data:
-        inspector = visit_data.get("inspector", "") or inspector
+    # Build inspector name — profile name takes priority
+    profile_name = await _get_inspector_name(user["id"])
+    inspector = profile_name or (visit_data.get("inspector", "") if visit_data else "") or user.get("email", "")
 
     # Generate PDF with embedded photos and logo
     pdf_bytes = generate_report_pdf(
@@ -236,6 +235,9 @@ async def get_report(
         attendees=visit_data.get("attendees", "") if visit_data else "",
         access_notes=visit_data.get("access_notes", "") if visit_data else "",
         company_name=company_name,
+        checker=visit_data.get("checker", "") if visit_data else "",
+        reviewer=visit_data.get("reviewer", "") if visit_data else "",
+        approver=visit_data.get("approver", "") if visit_data else "",
     )
 
     # Return as downloadable PDF

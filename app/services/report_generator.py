@@ -103,6 +103,9 @@ class SiteVisitReport(FPDF):
         attendees: str = "",
         access_notes: str = "",
         company_name: str = "",
+        checker: str = "",
+        reviewer: str = "",
+        approver: str = "",
     ):
         super().__init__()
         self.project = project
@@ -113,6 +116,9 @@ class SiteVisitReport(FPDF):
         self.attendees = attendees
         self.access_notes = access_notes
         self.company_name = company_name
+        self.checker = checker
+        self.reviewer = reviewer
+        self.approver = approver
         self._logo_path: Optional[str] = None
         self._is_cover = False
 
@@ -245,7 +251,7 @@ class SiteVisitReport(FPDF):
         # Company name
         if self.company_name:
             self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 14)
-            self.set_text_color(*ORANGE)
+            self.set_text_color(*BLACK)
             self.cell(0, 8, self.company_name, ln=True)
             self.ln(4)
 
@@ -261,10 +267,10 @@ class SiteVisitReport(FPDF):
         self.cell(0, 10, "SITE VISIT REPORT", ln=True)
         self.ln(2)
 
-        # Visit number
+        # Visit and issue number
         self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 14)
         self.set_text_color(*DARK)
-        self.cell(0, 8, f"Site visit No. {self.visit_no}", ln=True)
+        self.cell(0, 8, f"Site visit No. {self.visit_no}  |  Issue No. {self.visit_no}", ln=True)
         self.ln(4)
 
         # Client + date
@@ -323,9 +329,9 @@ class SiteVisitReport(FPDF):
         # Print Name row
         self._table_cell(sign_cols[0], "Print Name", bold=True, fill=True)
         self._table_cell(sign_cols[1], self.inspector)
-        self._table_cell(sign_cols[2], "")
-        self._table_cell(sign_cols[3], "")
-        self._table_cell(sign_cols[4], "")
+        self._table_cell(sign_cols[2], self.checker)
+        self._table_cell(sign_cols[3], self.reviewer)
+        self._table_cell(sign_cols[4], self.approver)
         self.ln()
 
         # Date row
@@ -441,7 +447,7 @@ class SiteVisitReport(FPDF):
                 location = location[:27] + "..."
             date_str = snag.get("created_at", "")[:10] if snag.get("created_at") else ""
 
-            row = [str(snag.get("snag_no", idx + 1)), note, location]
+            row = [str(idx + 1), note, location]
             if show_priority:
                 row.append(snag.get("priority", "medium").upper())
             row.append(date_str)
@@ -531,8 +537,8 @@ class SiteVisitReport(FPDF):
             self.set_y(hdr_y + hdr_h)
             y_content = self.get_y()
 
-            # ── Item number row (use fixed snag_no) ──
-            item_no = snag.get("snag_no", idx + 1)
+            # ── Item number row (report-local numbering: 01, 02, 03...) ──
+            item_no = idx + 1
             is_closed = snag.get("status") == "closed"
 
             self.set_xy(MARGIN, y_content)
@@ -693,13 +699,14 @@ class SiteVisitReport(FPDF):
         self.ln(8)
         self._set_body(10)
         self.cell(0, 6, "Signed:", ln=True)
-        self.ln(12)
+        self.ln(6)
+        # Name above the line
+        self._set_body(10, bold=True)
+        self.cell(70, 6, self.inspector, ln=True)
+        self.ln(1)
         self.set_draw_color(*BLACK)
         self.set_line_width(0.3)
         self.line(MARGIN, self.get_y(), MARGIN + 70, self.get_y())
-        self.ln(2)
-        self._set_body(9)
-        self.cell(70, 5, self.inspector)
 
     # ─── Build the full report ──────────────────────────────────
     def build(self, photo_data: Optional[Dict[str, Any]] = None) -> bytes:
@@ -735,6 +742,9 @@ def generate_report_pdf(
     attendees: str = "",
     access_notes: str = "",
     company_name: str = "",
+    checker: str = "",
+    reviewer: str = "",
+    approver: str = "",
 ) -> bytes:
     """
     Generate a professional site visit report PDF.
@@ -749,5 +759,8 @@ def generate_report_pdf(
         attendees=attendees,
         access_notes=access_notes,
         company_name=company_name,
+        checker=checker,
+        reviewer=reviewer,
+        approver=approver,
     )
     return report.build(photo_data=photo_data)

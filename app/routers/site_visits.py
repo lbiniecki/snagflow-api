@@ -17,6 +17,9 @@ class CreateVisit(BaseModel):
     inspector: str = ""
     attendees: str = ""
     access_notes: str = ""
+    checker: str = ""
+    reviewer: str = ""
+    approver: str = ""
 
 
 class UpdateVisit(BaseModel):
@@ -25,6 +28,9 @@ class UpdateVisit(BaseModel):
     inspector: Optional[str] = None
     attendees: Optional[str] = None
     access_notes: Optional[str] = None
+    checker: Optional[str] = None
+    reviewer: Optional[str] = None
+    approver: Optional[str] = None
 
 
 @router.get("/")
@@ -81,6 +87,9 @@ async def create_visit(
             "inspector": body.inspector or user.get("email", ""),
             "attendees": body.attendees,
             "access_notes": body.access_notes,
+            "checker": body.checker,
+            "reviewer": body.reviewer,
+            "approver": body.approver,
         })
         .execute()
     )
