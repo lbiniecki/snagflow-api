@@ -237,7 +237,7 @@ async def list_members(user: dict = Depends(get_current_user)):
     try:
         profiles_res = (
             supabase_admin.table("profiles")
-            .select("id, full_name, email")
+            .select("id, first_name, last_name, email")
             .in_("id", user_ids)
             .execute()
         )
@@ -255,7 +255,7 @@ async def list_members(user: dict = Depends(get_current_user)):
             "user_id": m["user_id"],
             "role": m["role"],
             "email": profile.get("email", ""),
-            "full_name": profile.get("full_name", ""),
+            "full_name": f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip(),
             "created_at": m["created_at"],
         })
 
