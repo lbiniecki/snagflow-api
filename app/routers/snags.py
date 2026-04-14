@@ -5,6 +5,7 @@ Supports up to 4 photos per snag, visit scoping, and close-with-photo.
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from app.services.auth_dep import get_current_user
 from app.services.supabase_client import supabase_admin
+from app.services.plan_enforcement import check_snag_limit
 from app.config import settings
 from typing import List, Optional
 from uuid import uuid4
@@ -13,6 +14,8 @@ from pydantic import BaseModel
 router = APIRouter()
 
 BUCKET = "snag-photos"
+MAX_NOTE_LEN = 2000
+MAX_LOCATION_LEN = 500
 
 
 # ─── Response model (replaces schemas.SnagResponse) ───────────
@@ -145,6 +148,17 @@ async def create_snag(
     if not proj.data:
         raise HTTPException(status_code=404, detail="Project not found")
 
+    # Input validation
+    if len(note) > MAX_NOTE_LEN:
+        raise HTTPException(status_code=400, detail=f"Description too long (max {MAX_NOTE_LEN} chars)")
+    if location and len(location) > MAX_LOCATION_LEN:
+        raise HTTPException(status_code=400, detail=f"Location too long (max {MAX_LOCATION_LEN} chars)")
+    if priority not in ("low", "medium", "high"):
+        raise HTTPException(status_code=400, detail="Priority must be low, medium, or high")
+
+    # Plan limit check
+    await check_snag_limit(user["id"], project_id)
+
     # Block adding snags to closed visits
     if visit_id:
         visit = (
@@ -180,8 +194,8 @@ async def create_snag(
     data = {
         "id": snag_id,
         "project_id": project_id,
-        "note": note,
-        "location": location,
+        "note": note.strip()[:MAX_NOTE_LEN],
+        "location": (location or "").strip()[:MAX_LOCATION_LEN] or None,
         "priority": priority,
         "status": "open",
         "photo_path": photo_path,

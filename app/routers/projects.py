@@ -1,13 +1,19 @@
 """
-Projects router — CRUD, scoped to authenticated user
+Projects router — CRUD, scoped to authenticated user.
+Enforces plan limits on project creation.
 """
 from fastapi import APIRouter, Depends, HTTPException
 from app.models.schemas import ProjectCreate, ProjectUpdate, ProjectResponse
 from app.services.auth_dep import get_current_user
 from app.services.supabase_client import supabase_admin
+from app.services.plan_enforcement import check_project_limit
 from typing import List
 
 router = APIRouter()
+
+# Input limits
+MAX_NAME_LEN = 200
+MAX_FIELD_LEN = 500
 
 
 @router.get("/", response_model=List[ProjectResponse])
@@ -42,11 +48,22 @@ async def list_projects(user: dict = Depends(get_current_user)):
 async def create_project(
     project: ProjectCreate, user: dict = Depends(get_current_user)
 ):
-    """Create a new project."""
+    """Create a new project. Enforces plan project limit."""
+    # Input validation
+    if len(project.name or "") > MAX_NAME_LEN:
+        raise HTTPException(status_code=400, detail=f"Project name too long (max {MAX_NAME_LEN} chars)")
+    if len(project.client or "") > MAX_FIELD_LEN:
+        raise HTTPException(status_code=400, detail=f"Client name too long (max {MAX_FIELD_LEN} chars)")
+    if len(project.address or "") > MAX_FIELD_LEN:
+        raise HTTPException(status_code=400, detail=f"Address too long (max {MAX_FIELD_LEN} chars)")
+
+    # Plan limit check
+    await check_project_limit(user["id"])
+
     data = {
-        "name": project.name,
-        "client": project.client,
-        "address": project.address,
+        "name": project.name.strip()[:MAX_NAME_LEN],
+        "client": (project.client or "").strip()[:MAX_FIELD_LEN],
+        "address": (project.address or "").strip()[:MAX_FIELD_LEN],
         "user_id": user["id"],
     }
     res = supabase_admin.table("projects").insert(data).execute()
@@ -98,7 +115,6 @@ async def update_project(
     user: dict = Depends(get_current_user),
 ):
     """Update a project."""
-    # Verify ownership
     existing = (
         supabase_admin.table("projects")
         .select("id")
@@ -112,6 +128,14 @@ async def update_project(
     data = {k: v for k, v in update.dict().items() if v is not None}
     if not data:
         raise HTTPException(status_code=400, detail="No fields to update")
+
+    # Validate lengths
+    if "name" in data and len(data["name"]) > MAX_NAME_LEN:
+        raise HTTPException(status_code=400, detail=f"Name too long (max {MAX_NAME_LEN} chars)")
+    if "client" in data and len(data["client"]) > MAX_FIELD_LEN:
+        raise HTTPException(status_code=400, detail=f"Client too long (max {MAX_FIELD_LEN} chars)")
+    if "address" in data and len(data["address"]) > MAX_FIELD_LEN:
+        raise HTTPException(status_code=400, detail=f"Address too long (max {MAX_FIELD_LEN} chars)")
 
     res = (
         supabase_admin.table("projects")
