@@ -60,3 +60,10 @@ async def refresh(refresh_token: str):
         }
     except Exception as e:
         raise HTTPException(status_code=401, detail="Token refresh failed")
+from app.services.auth_dep import get_current_user
+from fastapi import Depends
+
+@router.get("/me")
+async def get_me(user: dict = Depends(get_current_user)):
+    """Return current user info from token."""
+    return {"id": user["id"], "email": user.get("email", "")}
