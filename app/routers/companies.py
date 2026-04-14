@@ -220,17 +220,36 @@ async def list_members(user: dict = Depends(get_current_user)):
     if not company:
         raise HTTPException(status_code=404, detail="No company found")
 
+    # Fetch members (no join — profiles FK may not exist)
     members = (
         supabase_admin.table("company_members")
-        .select("id, user_id, role, created_at, profiles(full_name, email)")
+        .select("id, user_id, role, created_at")
         .eq("company_id", company["id"])
         .execute()
     )
 
-    # Format response with name/email from profiles
+    if not members.data:
+        return []
+
+    # Fetch profiles separately for all member user_ids
+    user_ids = [m["user_id"] for m in members.data]
+    profiles_map = {}
+    try:
+        profiles_res = (
+            supabase_admin.table("profiles")
+            .select("id, full_name, email")
+            .in_("id", user_ids)
+            .execute()
+        )
+        for p in (profiles_res.data or []):
+            profiles_map[p["id"]] = p
+    except Exception:
+        pass  # If profiles table doesn't exist or query fails, continue without names
+
+    # Merge
     result = []
-    for m in (members.data or []):
-        profile = m.get("profiles") or {}
+    for m in members.data:
+        profile = profiles_map.get(m["user_id"], {})
         result.append({
             "id": m["id"],
             "user_id": m["user_id"],
@@ -464,7 +483,7 @@ async def auto_join_company(user: dict = Depends(get_current_user)):
     # Check for pending invites matching this email
     invite_res = (
         supabase_admin.table("company_invites")
-        .select("*, companies(name)")
+        .select("*")
         .eq("email", user_email)
         .eq("status", "pending")
         .order("created_at", desc=True)
@@ -502,7 +521,20 @@ async def auto_join_company(user: dict = Depends(get_current_user)):
         {"status": "accepted"}
     ).eq("id", invite["id"]).execute()
 
-    company_name = invite.get("companies", {}).get("name", "the team")
+    # Get company name
+    company_name = "the team"
+    try:
+        c_res = (
+            supabase_admin.table("companies")
+            .select("name")
+            .eq("id", invite["company_id"])
+            .single()
+            .execute()
+        )
+        if c_res.data:
+            company_name = c_res.data["name"]
+    except Exception:
+        pass
 
     return {
         "status": "joined",
