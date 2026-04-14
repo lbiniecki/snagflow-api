@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 
-from app.routers import auth, projects, snags, reports, transcribe, site_visits, companies, profiles
+from app.routers import auth, projects, snags, reports, transcribe, site_visits, companies, profiles, billing
 
 app = FastAPI(
     title="VoxSite API",
@@ -39,6 +39,7 @@ app.include_router(transcribe.router, prefix="/api/transcribe", tags=["Transcrip
 app.include_router(site_visits.router, prefix="/api/site-visits", tags=["Site Visits"])
 app.include_router(companies.router, prefix="/api/companies", tags=["Companies"])
 app.include_router(profiles.router, prefix="/api/profiles", tags=["Profiles"])
+app.include_router(billing.router, prefix="/api/billing", tags=["Billing"])
 
 
 @app.get("/")
