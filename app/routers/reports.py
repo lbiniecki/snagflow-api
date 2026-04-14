@@ -1,6 +1,8 @@
 """
-Reports router — generate professional PDF snagging reports
+Reports router — generate professional PDF snagging reports.
+Now scoped to a site visit (or falls back to all project snags).
 Downloads photos from Supabase storage and embeds them in the PDF.
+Fetches company logo for branding.
 """
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -26,9 +28,49 @@ async def _download_photo(url: str) -> bytes | None:
     return None
 
 
+async def _get_company_logo(user_id: str) -> bytes | None:
+    """Fetch the company logo bytes for branding."""
+    try:
+        # Find user's company
+        company = (
+            supabase_admin.table("companies")
+            .select("logo_path")
+            .eq("owner_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        if not company.data:
+            # Check as member
+            mem = (
+                supabase_admin.table("company_members")
+                .select("companies(logo_path)")
+                .eq("user_id", user_id)
+                .limit(1)
+                .execute()
+            )
+            if mem.data and mem.data[0].get("companies"):
+                logo_path = mem.data[0]["companies"].get("logo_path")
+            else:
+                return None
+        else:
+            logo_path = company.data[0].get("logo_path")
+
+        if not logo_path:
+            return None
+
+        url_res = supabase_admin.storage.from_("company-logos").create_signed_url(logo_path, 300)
+        url = url_res.get("signedURL") or url_res.get("signedUrl")
+        if url:
+            return await _download_photo(url)
+    except Exception:
+        pass
+    return None
+
+
 @router.get("/{project_id}")
 async def get_report(
     project_id: str,
+    visit_id: str = Query("", description="Site visit ID (optional, generates for specific visit)"),
     include_closed: bool = True,
     include_photos: bool = True,
     weather: str = Query("", description="Weather conditions"),
@@ -36,8 +78,9 @@ async def get_report(
     user: dict = Depends(get_current_user),
 ):
     """
-    Generate a PDF snagging report for a project.
-    Returns a downloadable PDF file with embedded photos.
+    Generate a PDF snagging report.
+    If visit_id is provided, scopes to that visit.
+    Otherwise generates for all project snags (backwards compatible).
     """
     # Get project
     proj = (
@@ -51,13 +94,33 @@ async def get_report(
     if not proj.data:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # Get snags
+    # Get visit info if scoped
+    visit_data = None
+    if visit_id:
+        visit_res = (
+            supabase_admin.table("site_visits")
+            .select("*")
+            .eq("id", visit_id)
+            .single()
+            .execute()
+        )
+        if visit_res.data:
+            visit_data = visit_res.data
+            # Override weather/visit_no from visit record if not explicitly passed
+            if not weather:
+                weather = visit_data.get("weather", "")
+            if not visit_no:
+                visit_no = str(visit_data.get("visit_no", ""))
+
+    # Get snags — scoped to visit or whole project
     query = (
         supabase_admin.table("snags")
         .select("*")
         .eq("project_id", project_id)
         .order("created_at", desc=False)
     )
+    if visit_id:
+        query = query.eq("visit_id", visit_id)
     if not include_closed:
         query = query.eq("status", "open")
 
@@ -75,7 +138,6 @@ async def get_report(
                     s["photo_path"], 300
                 )
                 photo_url = url_res.get("signedURL") or url_res.get("signedUrl")
-                # Download the actual image bytes for PDF embedding
                 if photo_url:
                     img_bytes = await _download_photo(photo_url)
                     if img_bytes:
@@ -84,18 +146,32 @@ async def get_report(
                 pass
         snags.append({**s, "photo_url": photo_url})
 
-    # Generate PDF with embedded photos
+    # Fetch company logo
+    logo_bytes = await _get_company_logo(user["id"])
+
+    # Build inspector name
+    inspector = user.get("email", "")
+    if visit_data:
+        inspector = visit_data.get("inspector", "") or inspector
+
+    # Generate PDF with embedded photos and logo
     pdf_bytes = generate_report_pdf(
         project=proj.data,
         snags=snags,
-        inspector_email=user["email"],
+        inspector_email=inspector,
+        logo_bytes=logo_bytes,
         photo_data=photo_data,
         weather=weather,
         visit_no=visit_no,
+        attendees=visit_data.get("attendees", "") if visit_data else "",
+        access_notes=visit_data.get("access_notes", "") if visit_data else "",
     )
 
     # Return as downloadable PDF
-    filename = f"snagging-report-{proj.data['name'][:30].replace(' ', '-').lower()}.pdf"
+    project_name = proj.data['name'][:30].replace(' ', '-').lower()
+    visit_suffix = f"-visit-{visit_no}" if visit_no else ""
+    filename = f"snagging-report-{project_name}{visit_suffix}.pdf"
+
     return StreamingResponse(
         BytesIO(pdf_bytes),
         media_type="application/pdf",
@@ -106,11 +182,10 @@ async def get_report(
 @router.get("/{project_id}/preview")
 async def preview_report(
     project_id: str,
+    visit_id: str = Query("", description="Site visit ID"),
     user: dict = Depends(get_current_user),
 ):
-    """
-    Return report data as JSON for frontend preview.
-    """
+    """Return report data as JSON for frontend preview."""
     proj = (
         supabase_admin.table("projects")
         .select("*")
@@ -122,13 +197,16 @@ async def preview_report(
     if not proj.data:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    snags_res = (
+    query = (
         supabase_admin.table("snags")
         .select("*")
         .eq("project_id", project_id)
         .order("created_at", desc=False)
-        .execute()
     )
+    if visit_id:
+        query = query.eq("visit_id", visit_id)
+
+    snags_res = query.execute()
 
     open_snags = [s for s in snags_res.data if s["status"] == "open"]
     closed_snags = [s for s in snags_res.data if s["status"] == "closed"]

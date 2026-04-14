@@ -4,10 +4,36 @@ Professional Site Visit Report matching construction industry format.
 Structure: Cover → Document Control → Snag Items (with photos) → Closing
 """
 import io
+import os
 import tempfile
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from fpdf import FPDF
+
+# ─── Unicode font detection ──────────────────────────────────────
+# Try to find DejaVu Sans for full Unicode support (Polish, Czech, etc.)
+_FONT_PATHS = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",           # Linux
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",      # Linux bold
+    "C:/Windows/Fonts/DejaVuSans.ttf",                            # Windows
+    "/System/Library/Fonts/Supplemental/DejaVuSans.ttf",          # macOS
+]
+
+def _find_font(bold=False):
+    """Find DejaVu Sans font file on the system."""
+    suffix = "-Bold" if bold else ""
+    for p in _FONT_PATHS:
+        if suffix and suffix not in p:
+            continue
+        if not suffix and "-Bold" in p:
+            continue
+        if os.path.exists(p):
+            return p
+    return None
+
+DEJAVU_REGULAR = _find_font(bold=False)
+DEJAVU_BOLD = _find_font(bold=True)
+HAS_UNICODE_FONT = bool(DEJAVU_REGULAR)
 
 # ─── Brand colours (no green — VoxSite orange + neutral dark) ──────
 ORANGE = (255, 107, 53)       # #FF6B35 — primary brand
@@ -90,6 +116,19 @@ class SiteVisitReport(FPDF):
 
         self.set_auto_page_break(auto=True, margin=25)
 
+        # Register Unicode font if available
+        self._use_unicode = False
+        if HAS_UNICODE_FONT:
+            try:
+                self.add_font("DejaVu", "", DEJAVU_REGULAR, uni=True)
+                if DEJAVU_BOLD:
+                    self.add_font("DejaVu", "B", DEJAVU_BOLD, uni=True)
+                else:
+                    self.add_font("DejaVu", "B", DEJAVU_REGULAR, uni=True)
+                self._use_unicode = True
+            except Exception:
+                pass  # fall back to Helvetica
+
         # Write logo bytes to a temp file so fpdf2 can load it
         if logo_bytes:
             try:
@@ -102,10 +141,16 @@ class SiteVisitReport(FPDF):
 
     # ─── Text sanitisation wrappers ─────────────────────────────
     def cell(self, w=0, h=0, txt="", **kwargs):
-        return super().cell(w=w, h=h, txt=_safe(str(txt)) if txt else "", **kwargs)
+        t = str(txt) if txt else ""
+        if not self._use_unicode:
+            t = _safe(t)
+        return super().cell(w=w, h=h, txt=t, **kwargs)
 
     def multi_cell(self, w, h=0, txt="", **kwargs):
-        return super().multi_cell(w=w, h=h, txt=_safe(str(txt)) if txt else "", **kwargs)
+        t = str(txt) if txt else ""
+        if not self._use_unicode:
+            t = _safe(t)
+        return super().multi_cell(w=w, h=h, txt=t, **kwargs)
 
     # ─── Header (inner pages only — cover has its own) ──────────
     def header(self):
@@ -130,7 +175,7 @@ class SiteVisitReport(FPDF):
         self.set_line_width(0.2)
         self.line(MARGIN, self.get_y(), PAGE_W - MARGIN, self.get_y())
         self.set_y(-15)
-        self.set_font("Helvetica", "", 7)
+        self.set_font("DejaVu" if self._use_unicode else "Helvetica", "", 7)
         self.set_text_color(*MID_GREY)
         p_code = self.project.get("name", "")
         p_id = self.project.get("id", "")[:8].upper()
@@ -141,20 +186,20 @@ class SiteVisitReport(FPDF):
 
     # ─── Helpers ────────────────────────────────────────────────
     def _set_brand(self, size=11, bold=True):
-        self.set_font("Helvetica", "B" if bold else "", size)
+        self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B" if bold else "", size)
         self.set_text_color(*ORANGE)
 
     def _set_body(self, size=9, bold=False):
-        self.set_font("Helvetica", "B" if bold else "", size)
+        self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B" if bold else "", size)
         self.set_text_color(*BLACK)
 
     def _set_muted(self, size=8):
-        self.set_font("Helvetica", "", size)
+        self.set_font("DejaVu" if self._use_unicode else "Helvetica", "", size)
         self.set_text_color(*MID_GREY)
 
     def _table_header_cell(self, w, txt, align="L"):
         """Grey header cell for tables."""
-        self.set_font("Helvetica", "B", 8)
+        self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 8)
         self.set_fill_color(*HEADER_GREY)
         self.set_text_color(*DARK)
         self.set_draw_color(*BORDER)
@@ -162,7 +207,7 @@ class SiteVisitReport(FPDF):
 
     def _table_cell(self, w, txt, h=6, align="L", bold=False, fill=False):
         """Standard table body cell."""
-        self.set_font("Helvetica", "B" if bold else "", 8)
+        self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B" if bold else "", 8)
         self.set_text_color(*BLACK)
         self.set_draw_color(*BORDER)
         if fill:
@@ -196,19 +241,19 @@ class SiteVisitReport(FPDF):
         self.set_y(PAGE_H * 0.4)
 
         # Project name
-        self.set_font("Helvetica", "", 24)
+        self.set_font("DejaVu" if self._use_unicode else "Helvetica", "", 24)
         self.set_text_color(*DARK)
         self.multi_cell(USABLE_W, 12, self.project.get("name", "[Project Name]"))
         self.ln(4)
 
         # "SITE VISIT REPORT"
-        self.set_font("Helvetica", "B", 18)
+        self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 18)
         self.set_text_color(*DARK)
         self.cell(0, 10, "SITE VISIT REPORT", ln=True)
         self.ln(2)
 
         # Visit number
-        self.set_font("Helvetica", "B", 14)
+        self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 14)
         self.set_text_color(*DARK)
         self.cell(0, 8, f"Site visit No. {self.visit_no}", ln=True)
         self.ln(4)
@@ -234,7 +279,7 @@ class SiteVisitReport(FPDF):
         self.add_page()
 
         # Title
-        self.set_font("Helvetica", "B", 13)
+        self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 13)
         self.set_text_color(*DARK)
         self.cell(0, 10, "DOCUMENT CONTROL SHEET", align="C", ln=True)
         self.ln(4)
@@ -337,11 +382,11 @@ class SiteVisitReport(FPDF):
             self.set_fill_color(*LIGHT_GREY)
             self.rect(x, y_start, box_w, 20, "F")
             self.set_xy(x, y_start + 2)
-            self.set_font("Helvetica", "B", 18)
+            self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 18)
             self.set_text_color(*color)
             self.cell(box_w, 10, str(val), align="C")
             self.set_xy(x, y_start + 13)
-            self.set_font("Helvetica", "", 6.5)
+            self.set_font("DejaVu" if self._use_unicode else "Helvetica", "", 6.5)
             self.set_text_color(*MID_GREY)
             self.cell(box_w, 4, label.upper(), align="C")
 
@@ -470,7 +515,7 @@ class SiteVisitReport(FPDF):
             self.rect(MARGIN, hdr_y, photo_w, hdr_h, "DF")
             self.rect(MARGIN + photo_w, hdr_y, action_w, hdr_h, "DF")
             self.set_xy(MARGIN, hdr_y + 1)
-            self.set_font("Helvetica", "B", 9)
+            self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 9)
             self.set_text_color(*DARK)
             self.cell(photo_w, 7, "Item number", align="C")
             self.set_xy(MARGIN + photo_w, hdr_y + 1)
@@ -480,7 +525,7 @@ class SiteVisitReport(FPDF):
 
             # ── Item number row ──
             self.set_xy(MARGIN, y_content)
-            self.set_font("Helvetica", "B", 11)
+            self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 11)
             self.set_text_color(*BLACK)
             self.set_draw_color(*BORDER)
             self.cell(photo_w, 8, f"{idx + 1:02d}", border="LR")
@@ -546,7 +591,7 @@ class SiteVisitReport(FPDF):
 
                         # Caption right under the photo
                         self.set_xy(MARGIN, img_bottom + 1)
-                        self.set_font("Helvetica", "I", 7.5)
+                        self.set_font("DejaVu" if self._use_unicode else "Helvetica", "I", 7.5)
                         self.set_text_color(*MID_GREY)
                         self.cell(photo_w, caption_h, f"Photo {item_no}.{pi + 1}", align="C")
 
@@ -575,7 +620,7 @@ class SiteVisitReport(FPDF):
             # Write action text in the right column
             x_right = MARGIN + photo_w
             self.set_xy(x_right + 2, y_content + 2)
-            self.set_font("Helvetica", "", 9)
+            self.set_font("DejaVu" if self._use_unicode else "Helvetica", "", 9)
             self.set_text_color(*BLACK)
             self.multi_cell(action_w - 4, 4.5, action_text)
             self.ln(6)
@@ -593,7 +638,7 @@ class SiteVisitReport(FPDF):
             if date_str:
                 meta.append(f"Date: {date_str}")
 
-            self.set_font("Helvetica", "", 7)
+            self.set_font("DejaVu" if self._use_unicode else "Helvetica", "", 7)
             self.set_text_color(*MID_GREY)
             for m in meta:
                 self.set_x(x_right + 2)
