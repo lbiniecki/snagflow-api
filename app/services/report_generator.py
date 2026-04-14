@@ -112,6 +112,7 @@ class SiteVisitReport(FPDF):
         self.project = project
         self.snags = snags
         self.inspector = inspector
+        self.inspector_email = ""  # set separately
         self.visit_no = visit_no or "1"
         self.weather = weather
         self.attendees = attendees
@@ -706,7 +707,7 @@ class SiteVisitReport(FPDF):
             self.set_text_color(*MID_GREY)
             for m in meta:
                 self.set_x(x_right + 2)
-                self.cell(action_w - 4, 3.5, m, ln=True)
+                self.multi_cell(action_w - 4, 3.5, m)
 
             text_bottom = self.get_y()
 
@@ -746,6 +747,12 @@ class SiteVisitReport(FPDF):
         self.set_draw_color(*BLACK)
         self.set_line_width(0.3)
         self.line(MARGIN, self.get_y(), MARGIN + 70, self.get_y())
+        self.ln(4)
+        # Date and email below
+        self._set_muted(8)
+        self.cell(70, 5, f"Date: {datetime.now().strftime('%d/%m/%Y')}", ln=True)
+        if self.inspector_email:
+            self.cell(70, 5, self.inspector_email, ln=True)
 
     # ─── Build the full report ──────────────────────────────────
     def build(self, photo_data: Optional[Dict[str, Any]] = None) -> bytes:
@@ -785,6 +792,7 @@ def generate_report_pdf(
     reviewer: str = "",
     approver: str = "",
     closing_notes: str = "",
+    user_email: str = "",
 ) -> bytes:
     """
     Generate a professional site visit report PDF.
@@ -804,4 +812,5 @@ def generate_report_pdf(
         approver=approver,
         closing_notes=closing_notes,
     )
+    report.inspector_email = user_email
     return report.build(photo_data=photo_data)

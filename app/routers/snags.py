@@ -199,13 +199,17 @@ async def create_snag(
     return _row_to_snag(res.data[0])
 
 
+class SnagUpdate(BaseModel):
+    note: Optional[str] = None
+    location: Optional[str] = None
+    priority: Optional[str] = None
+    status: Optional[str] = None
+
+
 @router.patch("/{snag_id}", response_model=SnagOut)
 async def update_snag(
     snag_id: str,
-    note: Optional[str] = None,
-    location: Optional[str] = None,
-    priority: Optional[str] = None,
-    status: Optional[str] = None,
+    body: SnagUpdate,
     user: dict = Depends(get_current_user),
 ):
     """Update a snag's note, location, priority, or status."""
@@ -218,15 +222,7 @@ async def update_snag(
     if not snag.data or snag.data[0]["projects"]["user_id"] != user["id"]:
         raise HTTPException(status_code=404, detail="Snag not found")
 
-    updates = {}
-    if note is not None:
-        updates["note"] = note
-    if location is not None:
-        updates["location"] = location
-    if priority is not None:
-        updates["priority"] = priority
-    if status is not None:
-        updates["status"] = status
+    updates = {k: v for k, v in body.dict().items() if v is not None}
 
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")

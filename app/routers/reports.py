@@ -239,6 +239,7 @@ async def get_report(
         reviewer=visit_data.get("reviewer", "") if visit_data else "",
         approver=visit_data.get("approver", "") if visit_data else "",
         closing_notes=visit_data.get("closing_notes", "") if visit_data else "",
+        user_email=user.get("email", ""),
     )
 
     # Return as downloadable PDF
