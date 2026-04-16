@@ -329,6 +329,7 @@ async def send_welcome_email(
         to=to_email,
         subject="Welcome to VoxSite",
         html=html,
+        reply_to=settings.SUPPORT_EMAIL,
         tags=[{"name": "category", "value": "welcome"}],
     )
 
@@ -442,6 +443,7 @@ async def send_subscription_confirmation_email(
         to=to_email,
         subject=title,
         html=html,
+        reply_to=settings.SUPPORT_EMAIL,
         tags=[
             {"name": "category", "value": "subscription"},
             {"name": "plan", "value": plan_slug.lower()},

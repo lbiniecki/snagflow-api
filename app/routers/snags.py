@@ -34,6 +34,7 @@ class SnagOut(BaseModel):
     status: str
     priority: str
     photo_url: Optional[str] = None
+    photo_urls: list[Optional[str]] = []  # 4-element list, slot-ordered; None for empty slots
     photo_count: int = 0  # number of photos currently attached (0..4)
     created_at: str
     updated_at: str
@@ -73,8 +74,12 @@ def get_signed_url(path: str) -> Optional[str]:
 
 
 def _row_to_snag(row: dict) -> SnagOut:
-    photo_paths = [row.get(k) for k in ("photo_path", "photo_path_2", "photo_path_3", "photo_path_4")]
+    photo_paths = [row.get(k) for k in _PHOTO_SLOTS]
     photo_count = sum(1 for p in photo_paths if p)
+    # Signed URLs per slot — None preserves slot position so the frontend
+    # edit modal knows which slot each thumbnail corresponds to (needed for
+    # per-slot delete).
+    photo_urls = [get_signed_url(p) if p else None for p in photo_paths]
     return SnagOut(
         id=row["id"],
         project_id=row["project_id"],
@@ -84,7 +89,8 @@ def _row_to_snag(row: dict) -> SnagOut:
         location=row.get("location"),
         status=row["status"],
         priority=row["priority"],
-        photo_url=get_signed_url(row.get("photo_path")),
+        photo_url=photo_urls[0],
+        photo_urls=photo_urls,
         photo_count=photo_count,
         created_at=row["created_at"],
         updated_at=row.get("updated_at", row["created_at"]),
@@ -324,6 +330,65 @@ async def add_photos(
     )
     if not res.data:
         raise HTTPException(status_code=500, detail="Failed to attach photos")
+
+    return _row_to_snag(res.data[0])
+
+
+@router.delete("/{snag_id}/photos/{slot}", response_model=SnagOut)
+async def delete_photo_slot(
+    snag_id: str,
+    slot: int,
+    user: dict = Depends(get_current_user),
+):
+    """
+    Remove a single photo from a snag.
+
+    `slot` is 1..4 (1-based, human-friendly). Clears the corresponding
+    photo_path* column in DB and deletes the file from Storage. Returns the
+    updated snag so the caller can refresh its view without another round-trip.
+
+    If the slot is already empty, this is a no-op returning the snag
+    unchanged. That makes the UI forgiving of double-clicks.
+    """
+    if slot < 1 or slot > MAX_PHOTOS_PER_SNAG:
+        raise HTTPException(status_code=400, detail=f"slot must be between 1 and {MAX_PHOTOS_PER_SNAG}")
+
+    # Fetch snag + ownership check
+    snag = (
+        supabase_admin.table("snags")
+        .select("*, projects!inner(user_id)")
+        .eq("id", snag_id)
+        .execute()
+    )
+    if not snag.data or snag.data[0]["projects"]["user_id"] != user["id"]:
+        raise HTTPException(status_code=404, detail="Snag not found")
+
+    row = snag.data[0]
+    slot_idx = slot - 1   # 0-based for array access
+    column = _PHOTO_SLOTS[slot_idx]
+    existing_path = row.get(column)
+
+    if not existing_path:
+        # No-op — slot already empty. Return current state.
+        return _row_to_snag(row)
+
+    # Best-effort: delete the file from Storage. We don't fail the whole
+    # request if this fails — the user wanted the photo gone, and the DB
+    # nulling is the authoritative source of truth.
+    try:
+        supabase_admin.storage.from_(BUCKET).remove([existing_path])
+    except Exception:
+        pass
+
+    # Null out the slot in DB
+    res = (
+        supabase_admin.table("snags")
+        .update({column: None})
+        .eq("id", snag_id)
+        .execute()
+    )
+    if not res.data:
+        raise HTTPException(status_code=500, detail="Failed to remove photo")
 
     return _row_to_snag(res.data[0])
 
