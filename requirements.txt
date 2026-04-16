@@ -10,3 +10,4 @@ fpdf2==2.8.1
 python-dotenv==1.0.1
 stripe
 resend[async]>=2.0.0
+email-validator>=2.0.0
