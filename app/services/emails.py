@@ -63,7 +63,7 @@ async def send_team_invite_email(
           <p>Hi,</p>
           <p><strong>{inviter_safe}</strong> has invited you to join the
              <strong>{company_safe}</strong> team on VoxSite — a mobile-first
-             construction snagging tool.</p>
+             construction inspection tool.</p>
           <p>To accept, create a free VoxSite account with
              <strong>{_html.escape(to_email)}</strong>. You'll be added to the
              team automatically when you sign in for the first time.</p>
@@ -83,7 +83,7 @@ async def send_team_invite_email(
           <p><strong>{inviter_safe}</strong> has added you to the
              <strong>{company_safe}</strong> team on VoxSite.</p>
           <p>You can now view and contribute to {company_safe}'s projects, site
-             visits, and snag reports. Open VoxSite to get started.</p>
+             visits, and inspection reports. Open VoxSite to get started.</p>
         """
 
     html = render_email(
@@ -303,11 +303,11 @@ async def send_welcome_email(
       <p>{greeting}</p>
       <p>Welcome to VoxSite — thanks for signing up. You're now set up on the
          <strong>Free plan</strong> with room for 1 user, 2 projects, and 20
-         snags per month.</p>
+         items per month.</p>
       <p><strong>Three things to do in the first five minutes:</strong></p>
       <ol style="padding-left: 20px; line-height: 1.7;">
         <li>Create your first project (the site you're inspecting).</li>
-        <li>Start a site visit and capture snags — tap the mic to dictate,
+        <li>Start a site visit and capture items — tap the mic to dictate,
             snap up to 4 photos per item.</li>
         <li>Generate a PDF report when you're done.</li>
       </ol>
@@ -363,25 +363,25 @@ async def send_subscription_confirmation_email(
     perks_by_plan = {
         "starter": [
             "Up to 3 team members",
-            "5 projects, 100 snags/month",
+            "5 projects, 100 items/month",
             "Company logo on PDF reports",
             "No VoxSite watermark",
         ],
         "team": [
             "Up to 10 team members",
-            "15 projects, 500 snags/month",
+            "15 projects, 500 items/month",
             "Email PDF reports to clients",
             "Company logo on PDF reports",
         ],
         "pro": [
             "Up to 25 team members",
-            "Unlimited projects & snags",
+            "Unlimited projects & items",
             "Email PDF reports to clients",
             "Everything in Team",
         ],
         "business": [
             "Up to 50 team members",
-            "Unlimited projects & snags",
+            "Unlimited projects & items",
             "Priority support",
             "Everything in Pro",
         ],

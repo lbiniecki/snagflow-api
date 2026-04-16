@@ -64,7 +64,7 @@ async def check_project_limit(user_id: str):
 
 
 async def check_snag_limit(user_id: str, project_id: str):
-    """Raise 403 if user has hit their monthly snag limit."""
+    """Raise 403 if user has hit their monthly item limit."""
     plan, company_id = await get_company_plan(user_id)
     limits = get_limits(plan)
 

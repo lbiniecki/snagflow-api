@@ -172,7 +172,7 @@ async def reopen_visit(
     visit_id: str,
     user: dict = Depends(get_current_user),
 ):
-    """Reopen a closed site visit so new snags can be added."""
+    """Reopen a closed site visit so new items can be added."""
     visit = (
         supabase_admin.table("site_visits")
         .select("*, projects!inner(user_id)")

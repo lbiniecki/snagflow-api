@@ -1,5 +1,5 @@
 """
-Reports router — generate professional PDF snagging reports.
+Reports router — generate professional PDF inspection reports.
 
 Two entry points:
   GET  /api/reports/{project_id}           → download PDF
@@ -388,7 +388,7 @@ async def get_report(
     visit_no: str = Query("", description="Visit number"),
     user: dict = Depends(get_current_user),
 ):
-    """Generate and return a PDF snagging report as a download."""
+    """Generate and return a PDF inspection report as a download."""
     result = await _build_project_report_pdf(
         project_id=project_id,
         user=user,

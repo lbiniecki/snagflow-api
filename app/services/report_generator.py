@@ -465,7 +465,7 @@ class SiteVisitReport(FPDF):
         y_start = self.get_y()
         box_w = USABLE_W / 4 - 2
         stats = [
-            ("Total Snags", len(self.snags), BLACK),
+            ("Total Items", len(self.snags), BLACK),
             ("Open", len(open_snags), RED),
             ("Closed", len(closed_snags), GREEN),
             ("High Priority", len(high_pri), AMBER),
@@ -488,13 +488,13 @@ class SiteVisitReport(FPDF):
 
         # ── Open Snags table ──
         if open_snags:
-            self._section_title(f"Open Snags ({len(open_snags)})")
+            self._section_title(f"Open Items ({len(open_snags)})")
             self._snag_table(open_snags, show_priority=True)
             self.ln(4)
 
         # ── Closed Snags table ──
         if closed_snags:
-            self._section_title(f"Closed Snags ({len(closed_snags)})")
+            self._section_title(f"Closed Items ({len(closed_snags)})")
             self._snag_table(closed_snags, show_priority=False)
 
     def _snag_table(self, snags_list, show_priority=True):
