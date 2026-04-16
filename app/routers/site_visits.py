@@ -81,10 +81,22 @@ async def create_visit(
     if not proj.data:
         raise HTTPException(status_code=404, detail="Project not found")
 
+    # Calculate next visit_no for this project
+    latest = (
+        supabase_admin.table("site_visits")
+        .select("visit_no")
+        .eq("project_id", body.project_id)
+        .order("visit_no", desc=True)
+        .limit(1)
+        .execute()
+    )
+    next_no = (latest.data[0]["visit_no"] + 1) if latest.data else 1
+
     visit = (
         supabase_admin.table("site_visits")
         .insert({
             "project_id": body.project_id,
+            "visit_no": next_no,
             "weather": body.weather,
             "inspector": body.inspector or user.get("email", ""),
             "attendees": body.attendees,
