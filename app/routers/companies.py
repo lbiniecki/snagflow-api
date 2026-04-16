@@ -309,6 +309,16 @@ async def add_member(
     if not company or company["owner_id"] != user["id"]:
         raise HTTPException(status_code=403, detail="Only the owner can add members")
 
+    # Normalize email — Supabase stores auth.users.email lowercased internally,
+    # and the JWT that /join checks against also carries the lowercased form.
+    # We normalize here once so every downstream lookup and the invite row
+    # itself use the canonical form. Fixes case-mismatch bugs where an invite
+    # created with "User@Example.com" would never auto-join the user who
+    # signed up (since JWT would read "user@example.com").
+    body.email = (body.email or "").strip().lower()
+    if not body.email:
+        raise HTTPException(status_code=400, detail="Email is required")
+
     # ── Enforce license limits ─────────────────────────────────
     current_members = (
         supabase_admin.table("company_members")
@@ -335,12 +345,13 @@ async def add_member(
         )
 
     # ── Check if already a member ──────────────────────────────
-    # Search auth users for this email
+    # Search auth users for this email — compare lowercased since Supabase
+    # stores it that way.
     target_user = None
     try:
         users_res = supabase_admin.auth.admin.list_users()
         for u in users_res:
-            if hasattr(u, 'email') and u.email == body.email:
+            if hasattr(u, 'email') and (u.email or "").lower() == body.email:
                 target_user = u
                 break
     except Exception:
@@ -506,17 +517,19 @@ async def auto_join_company(user: dict = Depends(get_current_user)):
     user_email = user.get("email")
     if not user_email:
         return None
+    user_email_normalized = user_email.strip().lower()
 
     # Already in a company?
     existing = _get_user_company(user["id"])
     if existing:
         return {"status": "already_member", "company": existing}
 
-    # Check for pending invites matching this email
+    # Check for pending invites matching this email (case-insensitive — invites
+    # created by older code paths may have mixed-case emails).
     invite_res = (
         supabase_admin.table("company_invites")
         .select("*")
-        .eq("email", user_email)
+        .ilike("email", user_email_normalized)
         .eq("status", "pending")
         .order("created_at", desc=True)
         .limit(1)
