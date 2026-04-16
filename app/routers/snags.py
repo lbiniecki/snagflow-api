@@ -16,6 +16,11 @@ router = APIRouter()
 BUCKET = "snag-photos"
 MAX_NOTE_LEN = 2000
 MAX_LOCATION_LEN = 500
+MAX_PHOTOS_PER_SNAG = 4
+# Ordered list of the four photo-path columns on the `snags` table. Index in
+# this tuple also maps to the storage-path suffix (0 → "", 1 → "_2", etc.).
+_PHOTO_SLOTS = ("photo_path", "photo_path_2", "photo_path_3", "photo_path_4")
+_SLOT_SUFFIX = ("", "_2", "_3", "_4")
 
 
 # ─── Response model (replaces schemas.SnagResponse) ───────────
@@ -29,6 +34,7 @@ class SnagOut(BaseModel):
     status: str
     priority: str
     photo_url: Optional[str] = None
+    photo_count: int = 0  # number of photos currently attached (0..4)
     created_at: str
     updated_at: str
 
@@ -67,6 +73,8 @@ def get_signed_url(path: str) -> Optional[str]:
 
 
 def _row_to_snag(row: dict) -> SnagOut:
+    photo_paths = [row.get(k) for k in ("photo_path", "photo_path_2", "photo_path_3", "photo_path_4")]
+    photo_count = sum(1 for p in photo_paths if p)
     return SnagOut(
         id=row["id"],
         project_id=row["project_id"],
@@ -77,6 +85,7 @@ def _row_to_snag(row: dict) -> SnagOut:
         status=row["status"],
         priority=row["priority"],
         photo_url=get_signed_url(row.get("photo_path")),
+        photo_count=photo_count,
         created_at=row["created_at"],
         updated_at=row.get("updated_at", row["created_at"]),
     )
@@ -247,6 +256,75 @@ async def update_snag(
         .eq("id", snag_id)
         .execute()
     )
+    return _row_to_snag(res.data[0])
+
+
+@router.post("/{snag_id}/photos", response_model=SnagOut)
+async def add_photos(
+    snag_id: str,
+    photo: Optional[UploadFile] = File(None),
+    photo2: Optional[UploadFile] = File(None),
+    photo3: Optional[UploadFile] = File(None),
+    photo4: Optional[UploadFile] = File(None),
+    user: dict = Depends(get_current_user),
+):
+    """
+    Append photos to an existing snag.
+
+    The snag already has up to 4 photo slots (photo_path, photo_path_2..4).
+    New files are placed into whatever slots are currently empty, in order —
+    so if a snag has 2 photos and the caller uploads 2 new files, they land
+    in slots 3 and 4. If adding the new files would exceed 4 photos total,
+    the whole request is rejected with a 400.
+    """
+    # Fetch the snag + verify ownership via projects.user_id
+    snag = (
+        supabase_admin.table("snags")
+        .select("*, projects!inner(user_id)")
+        .eq("id", snag_id)
+        .execute()
+    )
+    if not snag.data or snag.data[0]["projects"]["user_id"] != user["id"]:
+        raise HTTPException(status_code=404, detail="Snag not found")
+
+    row = snag.data[0]
+
+    # Collect uploaded files in caller order, ignoring empty slots
+    new_files = [f for f in (photo, photo2, photo3, photo4) if f and f.filename]
+    if not new_files:
+        raise HTTPException(status_code=400, detail="No photos provided")
+
+    # Figure out which DB slots are currently empty
+    empty_slots: list[int] = [i for i, key in enumerate(_PHOTO_SLOTS) if not row.get(key)]
+    current_count = MAX_PHOTOS_PER_SNAG - len(empty_slots)
+
+    if len(new_files) > len(empty_slots):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"This snag already has {current_count} photo(s). "
+                f"Max {MAX_PHOTOS_PER_SNAG} per snag — can add {len(empty_slots)} more."
+            ),
+        )
+
+    # Upload into the first N empty slots, in order
+    updates: dict = {}
+    for i, file in enumerate(new_files):
+        slot_idx = empty_slots[i]
+        column = _PHOTO_SLOTS[slot_idx]
+        suffix = _SLOT_SUFFIX[slot_idx]
+        path = await upload_photo(file, user["id"], snag_id, suffix)
+        updates[column] = path
+
+    res = (
+        supabase_admin.table("snags")
+        .update(updates)
+        .eq("id", snag_id)
+        .execute()
+    )
+    if not res.data:
+        raise HTTPException(status_code=500, detail="Failed to attach photos")
+
     return _row_to_snag(res.data[0])
 
 

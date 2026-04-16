@@ -25,6 +25,15 @@ class Settings(BaseSettings):
     # JWT (Supabase handles this, but for manual verification)
     JWT_SECRET: str = "your-supabase-jwt-secret"
 
+    # ── Email (Resend) ────────────────────────────────────────
+    # Leave RESEND_API_KEY empty in dev — emails will be logged instead of
+    # sent (see services/email_service.py).
+    RESEND_API_KEY: str = ""
+    EMAIL_FROM: str = "noreply@voxsite.app"
+    EMAIL_FROM_NAME: str = "VoxSite"
+    SUPPORT_EMAIL: str = "support@voxsite.app"
+    APP_URL: str = "https://voxsite.app"
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

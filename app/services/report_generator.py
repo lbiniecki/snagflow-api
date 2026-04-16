@@ -107,6 +107,8 @@ class SiteVisitReport(FPDF):
         reviewer: str = "",
         approver: str = "",
         closing_notes: str = "",
+        show_watermark: bool = False,
+        show_logo: bool = True,
     ):
         super().__init__()
         self.project = project
@@ -130,6 +132,8 @@ class SiteVisitReport(FPDF):
         )
         self._logo_path: Optional[str] = None
         self._is_cover = False
+        self._show_watermark = show_watermark
+        self._show_logo = show_logo
         # Document reference: custom or auto-generated
         p_name = project.get("name", "")[:3].upper()
         self.doc_ref = f"{p_name}-SV{self.visit_no.zfill(2)}"
@@ -150,7 +154,8 @@ class SiteVisitReport(FPDF):
                 pass  # fall back to Helvetica
 
         # Write logo bytes to a temp file so fpdf2 can load it
-        if logo_bytes:
+        # Only keep a logo path if the plan allows logo rendering.
+        if logo_bytes and show_logo:
             try:
                 self._logo_tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
                 self._logo_tmp.write(logo_bytes)
@@ -174,6 +179,11 @@ class SiteVisitReport(FPDF):
 
     # ─── Header (inner pages only — cover has its own) ──────────
     def header(self):
+        # Watermark first, so content draws on top of it.
+        # Runs on every page including the cover.
+        if self._show_watermark:
+            self._draw_watermark()
+
         if self._is_cover:
             return
         # Right-aligned logo or company name
@@ -187,6 +197,57 @@ class SiteVisitReport(FPDF):
         self.set_line_width(0.3)
         self.line(MARGIN, self.get_y(), PAGE_W - MARGIN, self.get_y())
         self.ln(4)
+
+    # ─── Watermark (Free plan only) ─────────────────────────────
+    def _draw_watermark(self):
+        """
+        Draws a diagonal 'VOXSITE · FREE PLAN' watermark across the page.
+        Called from header() so it's behind all other content.
+        Uses a wide cell with align='C' inside a rotation context so centring
+        doesn't depend on measuring string width (which was brittle at large
+        font sizes).
+        """
+        # Save state we're about to change
+        prev_font_family = self.font_family
+        prev_font_style = self.font_style
+        prev_font_size = self.font_size_pt
+        prev_x, prev_y = self.get_x(), self.get_y()
+
+        try:
+            self.set_font(
+                "DejaVu" if self._use_unicode else "Helvetica",
+                "B",
+                44,
+            )
+            # Very pale grey so it doesn't overpower content
+            self.set_text_color(230, 230, 232)
+
+            cx, cy = PAGE_W / 2, PAGE_H / 2
+            text = "VOXSITE  ·  FREE PLAN"
+            cell_w = 200  # wider than any plausible string at 44pt
+            cell_h = 20
+
+            # Rotate around the page centre and draw a centred cell at
+            # (cx, cy). With align='C' the text is always visually centred
+            # inside the cell regardless of its width.
+            with self.rotation(angle=45, x=cx, y=cy):
+                self.set_xy(cx - cell_w / 2, cy - cell_h / 2)
+                self.cell(cell_w, cell_h, text, align="C")
+        except Exception:
+            # Watermark must never break the report
+            pass
+        finally:
+            # Restore so subsequent drawing is unaffected
+            try:
+                self.set_font(
+                    prev_font_family or ("DejaVu" if self._use_unicode else "Helvetica"),
+                    prev_font_style or "",
+                    prev_font_size or 10,
+                )
+            except Exception:
+                pass
+            self.set_text_color(*BLACK)
+            self.set_xy(prev_x, prev_y)
 
     # ─── Footer (all pages) ─────────────────────────────────────
     def footer(self):
@@ -793,10 +854,22 @@ def generate_report_pdf(
     approver: str = "",
     closing_notes: str = "",
     user_email: str = "",
+    plan: str = "free",
 ) -> bytes:
     """
     Generate a professional site visit report PDF.
+
+    `plan` drives plan-gated rendering:
+      - Free plan: diagonal "VOXSITE · FREE PLAN" watermark on every page,
+                   company logo is suppressed (logo is a paid feature).
+      - Starter+: no watermark, logo rendered if provided.
     """
+    # Import here to avoid circular import with services.plan_limits at module load
+    from app.services.plan_limits import has_feature
+
+    show_watermark = has_feature(plan, "pdf_watermark")
+    show_logo = has_feature(plan, "company_logo")
+
     report = SiteVisitReport(
         project=project,
         snags=snags,
@@ -811,6 +884,8 @@ def generate_report_pdf(
         reviewer=reviewer,
         approver=approver,
         closing_notes=closing_notes,
+        show_watermark=show_watermark,
+        show_logo=show_logo,
     )
     report.inspector_email = user_email
     return report.build(photo_data=photo_data)

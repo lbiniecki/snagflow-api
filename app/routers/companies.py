@@ -12,18 +12,29 @@ from pydantic import BaseModel
 from typing import Optional
 from app.services.auth_dep import get_current_user
 from app.services.supabase_client import supabase_admin
+from app.services.plan_limits import get_limits
+from app.services.emails import send_team_invite_email
 
 router = APIRouter()
 
-# Plan limits
-PLAN_LIMITS = {
-    "free": 1,
-    "starter": 2,
-    "team": 5,
-    "pro": 10,
-    "business": 25,
-    "enterprise": 999,
-}
+
+def _get_profile_name(user_id: str) -> str:
+    """Resolve 'first last' from the profiles table. Returns '' if missing."""
+    try:
+        res = (
+            supabase_admin.table("profiles")
+            .select("first_name, last_name")
+            .eq("id", user_id)
+            .single()
+            .execute()
+        )
+        if res.data:
+            first = (res.data.get("first_name") or "").strip()
+            last = (res.data.get("last_name") or "").strip()
+            return f"{first} {last}".strip()
+    except Exception:
+        pass
+    return ""
 
 
 class CreateCompany(BaseModel):
@@ -111,7 +122,7 @@ async def create_company(
             "name": body.name,
             "owner_id": user["id"],
             "plan": "free",
-            "max_users": PLAN_LIMITS["free"],
+            "max_users": get_limits("free")["max_users"],
         })
         .execute()
     )
@@ -312,8 +323,10 @@ async def add_member(
         .eq("status", "pending")
         .execute()
     )
+    # company_members already includes the owner (added at create time),
+    # so we don't add +1 here. Pending invites count as "seats used".
     current_count = (current_members.count or 0) + (pending_invites.count or 0)
-    max_users = company.get("max_users", PLAN_LIMITS.get(company.get("plan", "free"), 1))
+    max_users = get_limits(company.get("plan", "free"))["max_users"]
 
     if current_count >= max_users:
         raise HTTPException(
@@ -363,6 +376,17 @@ async def add_member(
             })
             .execute()
         )
+
+        # Send notification email (best-effort — don't fail the invite if email fails)
+        inviter_name = _get_profile_name(user["id"])
+        await send_team_invite_email(
+            to_email=body.email,
+            company_name=company["name"],
+            inviter_name=inviter_name,
+            inviter_email=user.get("email", ""),
+            is_new_user=False,
+        )
+
         return {
             "status": "added",
             "message": f"{body.email} has been added to your team",
@@ -397,9 +421,17 @@ async def add_member(
             "expires_at": expires_at,
         }).execute()
 
-        # TODO: Send invite email via Resend when configured
-        # from app.services.email_service import send_team_invite
-        # await send_team_invite(...)
+        # Send invite email (best-effort — invite is already saved, so even if
+        # email delivery fails the invite is still redeemable via /join).
+        inviter_name = _get_profile_name(user["id"])
+        await send_team_invite_email(
+            to_email=body.email,
+            company_name=company["name"],
+            inviter_name=inviter_name,
+            inviter_email=user.get("email", ""),
+            is_new_user=True,
+            invite_token=token,
+        )
 
         return {
             "status": "invited",

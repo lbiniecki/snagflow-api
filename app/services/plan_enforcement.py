@@ -3,7 +3,7 @@ Plan enforcement — checks whether an action is allowed under the company's pla
 """
 from fastapi import HTTPException
 from app.services.supabase_client import supabase_admin
-from app.services.plan_limits import get_limits
+from app.services.plan_limits import get_limits, has_feature
 from datetime import datetime, timezone
 
 
@@ -110,4 +110,13 @@ async def check_member_limit(user_id: str):
         raise HTTPException(
             status_code=403,
             detail=f"Team member limit reached ({current}/{limits['max_users']}). Upgrade your plan to add more users."
+        )
+
+
+def require_feature(plan: str, feature: str, error_detail: str | None = None):
+    """Raise 403 if the plan doesn't have the given feature."""
+    if not has_feature(plan, feature):
+        raise HTTPException(
+            status_code=403,
+            detail=error_detail or f"'{feature}' is not available on your current plan. Upgrade to unlock it."
         )
