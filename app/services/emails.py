@@ -23,16 +23,16 @@ async def send_team_invite_email(
     inviter_name: str,
     inviter_email: str,
     is_new_user: bool,
-    invite_token: Optional[str] = None,
+    setup_token: Optional[str] = None,
 ) -> bool:
     """
     Notifies someone they've been invited to a VoxSite team.
 
     Two variants:
       - is_new_user=True  → recipient doesn't have a VoxSite account yet.
-                            Email prompts them to sign up, then the existing
-                            email-match auto-join (see /api/companies/join)
-                            adds them to the team on first login.
+                            Their account was pre-created by the backend.
+                            Email contains a one-click setup link — they just
+                            choose a password and they're in.
       - is_new_user=False → recipient already has an account and has been
                             added directly to company_members. Email is a
                             courtesy notification — CTA opens the app.
@@ -46,16 +46,13 @@ async def send_team_invite_email(
     inviter_safe = _html.escape(inviter_display)
 
     if is_new_user:
-        # Include the token + email in the signup URL so the frontend can,
-        # later, pre-fill the email field and show "Joining {Company}".
-        # Not required for the join to work — the /join endpoint matches
-        # by email regardless of the token — but it enables a better UX.
+        # Single setup link — user clicks, chooses password, done.
         params = []
-        if invite_token:
-            params.append(f"invite={_html.escape(invite_token, quote=True)}")
+        if setup_token:
+            params.append(f"setup={_html.escape(setup_token, quote=True)}")
         params.append(f"email={_html.escape(to_email, quote=True)}")
         cta_url = f"{settings.APP_URL}/?{'&'.join(params)}"
-        cta_label = "Create your VoxSite account"
+        cta_label = "Set up your account"
 
         title = f"You've been invited to join {company_name} on VoxSite"
         preheader = f"{inviter_display} invited you to collaborate on {company_name}."
@@ -64,13 +61,8 @@ async def send_team_invite_email(
           <p><strong>{inviter_safe}</strong> has invited you to join the
              <strong>{company_safe}</strong> team on VoxSite — a mobile-first
              construction inspection tool.</p>
-          <p>To accept, create a free VoxSite account with
-             <strong>{_html.escape(to_email)}</strong>. You'll be added to the
-             team automatically when you sign in for the first time.</p>
-          <p style="color: #6B7280; font-size: 13px;">
-             Note: this invite is tied to your email address. If you sign up
-             with a different address, you'll need a new invite.
-          </p>
+          <p>Click the button below to choose your password and get started.
+             That's it — one step and you're in.</p>
         """
     else:
         cta_url = settings.APP_URL

@@ -11,8 +11,8 @@ Behaviour around Supabase email confirmation (see VOXSITE_EMAIL_SETUP.md §7):
     "invalid credentials".
 """
 from fastapi import APIRouter, HTTPException, Request, Depends
-from app.models.schemas import SignUpRequest, MagicLinkRequest, AuthResponse
-from app.services.supabase_client import supabase
+from app.models.schemas import SignUpRequest, MagicLinkRequest, SetupAccountRequest, AuthResponse
+from app.services.supabase_client import supabase, supabase_admin
 from app.services.auth_dep import get_current_user
 from app.services.rate_limiter import rate_limit
 from app.services.emails import send_welcome_email
@@ -120,3 +120,83 @@ async def refresh(refresh_token: str, request: Request):
 async def get_me(user: dict = Depends(get_current_user)):
     """Return current user info from token."""
     return {"id": user["id"], "email": user.get("email", "")}
+
+
+@router.post("/setup-account")
+async def setup_account(req: SetupAccountRequest, request: Request):
+    """
+    Complete account setup for an invited user.
+
+    The owner's invite created their auth.users row (pre-confirmed, no
+    password) and stored a one-time setup_token in user_metadata. The
+    invitee clicks the link in the invite email, which lands them on the
+    frontend's "Choose your password" screen. That screen calls this
+    endpoint with the token + their chosen password.
+
+    Flow:
+      1. Find the user by email
+      2. Verify setup_token matches
+      3. Set their password via admin API
+      4. Clear the setup_token (single-use)
+      5. Sign them in and return a JWT session
+    """
+    rate_limit(request, max_requests=5, window_seconds=300)
+
+    email = req.email.strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="Email is required")
+
+    # Find the user
+    target_user = None
+    try:
+        users_res = supabase_admin.auth.admin.list_users()
+        for u in users_res:
+            if hasattr(u, "email") and (u.email or "").lower() == email:
+                target_user = u
+                break
+    except Exception:
+        pass
+
+    if not target_user:
+        raise HTTPException(status_code=404, detail="No account found for this email")
+
+    # Verify the setup token
+    metadata = target_user.user_metadata or {}
+    stored_token = metadata.get("setup_token", "")
+    if not stored_token or stored_token != req.token:
+        raise HTTPException(
+            status_code=400,
+            detail="This setup link is invalid or has already been used. Ask your team admin to send a new invite.",
+        )
+
+    # Set the password and clear the setup token
+    try:
+        supabase_admin.auth.admin.update_user_by_id(
+            target_user.id,
+            {
+                "password": req.password,
+                "user_metadata": {
+                    **metadata,
+                    "setup_token": None,
+                    "needs_password": False,
+                },
+            },
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to set password: {e}")
+
+    # Sign them in with the new password
+    try:
+        res = supabase.auth.sign_in_with_password(
+            {"email": email, "password": req.password}
+        )
+        return AuthResponse(
+            access_token=res.session.access_token,
+            user_id=res.user.id,
+            email=res.user.email,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail="Password set successfully but auto-login failed. Please go to the login page and sign in with your new password.",
+        )

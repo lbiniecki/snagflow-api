@@ -405,7 +405,10 @@ async def add_member(
         }
 
     else:
-        # User does NOT exist yet — create a pending invite
+        # User does NOT exist yet — create their account (pre-confirmed,
+        # no password) and send a single branded invite email with a setup
+        # link. No Supabase confirmation email, no separate signup step.
+        #
         # Check if already invited
         existing_invite = (
             supabase_admin.table("company_invites")
@@ -418,7 +421,32 @@ async def add_member(
         if existing_invite.data:
             raise HTTPException(status_code=400, detail="This email already has a pending invite")
 
-        # Create invite
+        # Generate a one-time setup token
+        setup_token = secrets.token_urlsafe(36)
+
+        # Create the auth user — pre-confirmed, no password.
+        # The setup_token is stored in user_metadata so the
+        # /auth/setup-account endpoint can verify it later.
+        try:
+            new_user = supabase_admin.auth.admin.create_user({
+                "email": body.email,
+                "email_confirm": True,
+                "user_metadata": {
+                    "setup_token": setup_token,
+                    "needs_password": True,
+                    "invited_to_company": company["name"],
+                },
+            })
+        except Exception as e:
+            err_msg = str(e).lower()
+            if "already" in err_msg or "exists" in err_msg or "duplicate" in err_msg:
+                raise HTTPException(
+                    status_code=400,
+                    detail="An account with this email already exists. Try adding them as an existing user.",
+                )
+            raise HTTPException(status_code=500, detail=f"Failed to create account: {e}")
+
+        # Create invite row for tracking / revocation
         token = secrets.token_urlsafe(36)
         expires_at = (datetime.now(timezone.utc) + timedelta(days=14)).isoformat()
 
@@ -432,8 +460,20 @@ async def add_member(
             "expires_at": expires_at,
         }).execute()
 
-        # Send invite email (best-effort — invite is already saved, so even if
-        # email delivery fails the invite is still redeemable via /join).
+        # Pre-add them to the company so they're a member the moment they
+        # set their password (no need for /join auto-match).
+        user_id = new_user.user.id if hasattr(new_user, "user") and new_user.user else None
+        if user_id:
+            try:
+                supabase_admin.table("company_members").insert({
+                    "company_id": company["id"],
+                    "user_id": user_id,
+                    "role": body.role or "member",
+                }).execute()
+            except Exception:
+                pass  # Non-fatal — /join will catch it on first login
+
+        # Send the branded invite email with the setup link
         inviter_name = _get_profile_name(user["id"])
         await send_team_invite_email(
             to_email=body.email,
@@ -441,7 +481,7 @@ async def add_member(
             inviter_name=inviter_name,
             inviter_email=user.get("email", ""),
             is_new_user=True,
-            invite_token=token,
+            setup_token=setup_token,
         )
 
         return {

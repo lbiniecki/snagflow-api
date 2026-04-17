@@ -15,6 +15,12 @@ class SignUpRequest(BaseModel):
 class MagicLinkRequest(BaseModel):
     email: str
 
+class SetupAccountRequest(BaseModel):
+    """Used by invited users to set their password on first login."""
+    token: str
+    email: str
+    password: str = Field(..., min_length=6, max_length=128)
+
 class AuthResponse(BaseModel):
     access_token: str
     user_id: str
