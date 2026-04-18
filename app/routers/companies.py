@@ -450,13 +450,20 @@ async def add_member(
         token = secrets.token_urlsafe(36)
         expires_at = (datetime.now(timezone.utc) + timedelta(days=14)).isoformat()
 
+        # Status is "accepted" immediately — in this one-click flow the user
+        # is pre-added to company_members in the block below, so they ARE a
+        # member the moment this row is written. The invite row becomes an
+        # audit trail (who/when/which token) rather than a state machine.
+        # Leaving it "pending" causes two bugs:
+        #   1) Settings shows them as pending even though they're members.
+        #   2) Seat-count logic above double-counts them (member + pending).
         supabase_admin.table("company_invites").insert({
             "company_id": company["id"],
             "email": body.email,
             "role": body.role,
             "invited_by": user["id"],
             "token": token,
-            "status": "pending",
+            "status": "accepted",
             "expires_at": expires_at,
         }).execute()
 
@@ -562,6 +569,17 @@ async def auto_join_company(user: dict = Depends(get_current_user)):
     # Already in a company?
     existing = _get_user_company(user["id"])
     if existing:
+        # Defensive cleanup: sweep any legacy pending invites for this email
+        # left over from before the "mark accepted on creation" fix. Keeps
+        # the Settings UI tidy and prevents phantom seats being consumed.
+        try:
+            supabase_admin.table("company_invites").update(
+                {"status": "accepted"}
+            ).ilike("email", user_email_normalized).eq(
+                "status", "pending"
+            ).eq("company_id", existing["id"]).execute()
+        except Exception:
+            pass  # Non-fatal — cosmetic cleanup only.
         return {"status": "already_member", "company": existing}
 
     # Check for pending invites matching this email (case-insensitive — invites
