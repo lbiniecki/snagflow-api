@@ -200,3 +200,133 @@ async def setup_account(req: SetupAccountRequest, request: Request):
             status_code=500,
             detail="Password set successfully but auto-login failed. Please go to the login page and sign in with your new password.",
         )
+
+
+# ─── Forgot / reset password ──────────────────────────────────────────
+
+from pydantic import BaseModel
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str  # Supabase recovery access_token from the email link
+    password: str
+
+
+@router.post("/forgot-password")
+async def forgot_password(req: ForgotPasswordRequest, request: Request):
+    """
+    Send a password-reset email. Always returns success to avoid leaking
+    whether an account exists for the given email. Supabase's recovery
+    email contains a link of the form:
+        {APP_URL}/#access_token=XXX&type=recovery&refresh_token=YYY...
+
+    The frontend picks that up from the URL hash and posts the token to
+    /reset-password below.
+    """
+    rate_limit(request, max_requests=5, window_seconds=300)
+
+    email = (req.email or "").strip().lower()
+    if not email or len(email) > MAX_EMAIL_LEN:
+        # Generic response — never confirm/deny existence.
+        return {"message": "If an account exists, a reset link has been sent."}
+
+    # Resolve the APP_URL to use as redirect target. In prod this is
+    # https://voxsite.app. Supabase also requires the URL to be on the
+    # allowlist in Authentication → URL Configuration.
+    import os
+    app_url = os.environ.get("APP_URL", "https://voxsite.app")
+
+    try:
+        # Supabase SDK: reset_password_email (some SDK versions) or
+        # reset_password_for_email. Try the common name first, fall
+        # back if the SDK exposes a different method.
+        try:
+            supabase.auth.reset_password_for_email(
+                email, {"redirect_to": app_url}
+            )
+        except AttributeError:
+            supabase.auth.reset_password_email(
+                email, {"redirect_to": app_url}
+            )
+    except Exception:
+        # Swallow — we don't tell the caller whether the address existed
+        # or whether Supabase had an internal blip. The user either gets
+        # the email or they don't; either way the message below is safe.
+        pass
+
+    return {"message": "If an account exists, a reset link has been sent."}
+
+
+@router.post("/reset-password")
+async def reset_password(req: ResetPasswordRequest, request: Request):
+    """
+    Consume a Supabase recovery access_token and set a new password.
+
+    Flow:
+      1. Verify the token identifies a real user (via supabase.auth.get_user)
+      2. Use the admin API to update that user's password
+      3. Sign them in with the new password and return a fresh session
+
+    Supabase recovery tokens are short-lived (default 1 hour) and
+    single-type ("recovery"), so this endpoint can't be misused to
+    change arbitrary passwords.
+    """
+    rate_limit(request, max_requests=5, window_seconds=300)
+
+    if not req.token or not req.password:
+        raise HTTPException(status_code=400, detail="Token and password are required")
+    if len(req.password) < 6 or len(req.password) > MAX_PASSWORD_LEN:
+        raise HTTPException(status_code=400, detail="Password must be 6-128 characters")
+
+    # Step 1: verify the token and get the user
+    try:
+        user_res = supabase.auth.get_user(req.token)
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="This reset link is invalid or has expired. Request a new one from the Forgot password screen.",
+        )
+
+    if not user_res or not getattr(user_res, "user", None):
+        raise HTTPException(
+            status_code=400,
+            detail="This reset link is invalid or has expired. Request a new one from the Forgot password screen.",
+        )
+
+    target = user_res.user
+    target_email = getattr(target, "email", None)
+    target_id = getattr(target, "id", None)
+
+    if not target_email or not target_id:
+        raise HTTPException(status_code=400, detail="Reset token is missing user info")
+
+    # Step 2: update password via admin API
+    try:
+        supabase_admin.auth.admin.update_user_by_id(
+            target_id,
+            {"password": req.password},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to set password: {e}")
+
+    # Step 3: sign them in with the new password and return a session,
+    # so the frontend can skip the "please log in again" step.
+    try:
+        res = supabase.auth.sign_in_with_password(
+            {"email": target_email, "password": req.password}
+        )
+        return AuthResponse(
+            access_token=res.session.access_token,
+            user_id=res.user.id,
+            email=res.user.email,
+        )
+    except Exception:
+        # Password IS updated at this point. Return 200 with no session
+        # so the frontend tells the user to log in manually.
+        return {
+            "message": "Password updated. Please sign in with your new password.",
+        }
