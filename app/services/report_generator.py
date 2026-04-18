@@ -55,6 +55,23 @@ MARGIN = 15
 USABLE_W = PAGE_W - 2 * MARGIN
 
 
+def _hex_to_rgb(hex_str: str, fallback=ORANGE) -> tuple:
+    """
+    Parse '#RRGGBB' (case-insensitive) to an (r, g, b) tuple.
+    Returns `fallback` on anything malformed — the PDF must render
+    even if a company stored garbage in their settings.
+    """
+    if not hex_str or not isinstance(hex_str, str):
+        return fallback
+    s = hex_str.strip().lstrip("#")
+    if len(s) != 6:
+        return fallback
+    try:
+        return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+    except ValueError:
+        return fallback
+
+
 def _safe(text: str) -> str:
     """Sanitise text for Helvetica (latin-1 only). Replace common Unicode chars."""
     if not text:
@@ -109,6 +126,10 @@ class SiteVisitReport(FPDF):
         closing_notes: str = "",
         show_watermark: bool = False,
         show_logo: bool = True,
+        # ── Phase 1: per-company report settings ─────────────────
+        brand_colour: str = "#F97316",
+        footer_text: Optional[str] = None,
+        include_rectification: bool = False,
     ):
         super().__init__()
         self.project = project
@@ -134,6 +155,10 @@ class SiteVisitReport(FPDF):
         self._is_cover = False
         self._show_watermark = show_watermark
         self._show_logo = show_logo
+        # Phase 1 settings
+        self._brand_rgb = _hex_to_rgb(brand_colour)
+        self._footer_text = (footer_text or "").strip()
+        self._include_rectification = bool(include_rectification)
         # Document reference: custom or auto-generated
         p_name = project.get("name", "")[:3].upper()
         self.doc_ref = f"{p_name}-SV{self.visit_no.zfill(2)}"
@@ -267,7 +292,7 @@ class SiteVisitReport(FPDF):
     # ─── Helpers ────────────────────────────────────────────────
     def _set_brand(self, size=11, bold=True):
         self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B" if bold else "", size)
-        self.set_text_color(*ORANGE)
+        self.set_text_color(*self._brand_rgb)
 
     def _set_body(self, size=9, bold=False):
         self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B" if bold else "", size)
@@ -361,7 +386,7 @@ class SiteVisitReport(FPDF):
         self.cell(0, 6, f"Date: {datetime.now().strftime('%d %B %Y')}", ln=True)
 
         # Decorative accent bar at bottom (replaces HP dots + green sidebar)
-        self.set_fill_color(*ORANGE)
+        self.set_fill_color(*self._brand_rgb)
         self.rect(PAGE_W - 8, 0, 8, PAGE_H, "F")
 
         self._is_cover = False
@@ -772,6 +797,42 @@ class SiteVisitReport(FPDF):
 
             text_bottom = self.get_y()
 
+            # ── Rectification block (Phase 1 — company toggle) ──
+            # Small signature panel in the action column for contractors
+            # to fill in when the item is physically rectified. Empty
+            # fields by design — the PDF is printed or sent to the
+            # contractor who writes directly on it (or fills it in a
+            # PDF editor) and returns it to the inspector.
+            if self._include_rectification and not is_closed:
+                rect_top = text_bottom + 3
+                rect_inner_x = x_right + 2
+                rect_inner_w = action_w - 4
+                line_gap = 6  # vertical gap between fields
+
+                # Light-grey divider above the block
+                self.set_draw_color(*LIGHT_GREY)
+                self.line(rect_inner_x, rect_top, rect_inner_x + rect_inner_w, rect_top)
+
+                # "Rectification" title
+                self.set_xy(rect_inner_x, rect_top + 1.5)
+                self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 7)
+                self.set_text_color(*DARK)
+                self.cell(rect_inner_w, 3.5, "RECTIFICATION", ln=True)
+
+                # Three labelled fields, each with an underline to write on
+                fields = [
+                    "Rectified on:  ____ / ____ / ________",
+                    "Rectified by:  _________________________",
+                    "Signature:     _________________________",
+                ]
+                self.set_font("DejaVu" if self._use_unicode else "Helvetica", "", 7)
+                self.set_text_color(*BLACK)
+                for fld in fields:
+                    self.set_x(rect_inner_x)
+                    self.cell(rect_inner_w, line_gap, fld, ln=True)
+
+                text_bottom = self.get_y() + 1
+
             # ── Draw borders ──
             bottom = max(photo_bottom, text_bottom) + 4
             self.set_draw_color(*BORDER)
@@ -815,6 +876,17 @@ class SiteVisitReport(FPDF):
         if self.inspector_email:
             self.cell(70, 5, self.inspector_email, ln=True)
 
+        # Company-level footer text (Phase 1). If set, appears at the
+        # very bottom of the closing page — typically used for standard
+        # disclaimers, T&Cs references, or contact blocks.
+        if self._footer_text:
+            self.ln(10)
+            self.set_draw_color(*LIGHT_GREY)
+            self.line(MARGIN, self.get_y(), PAGE_W - MARGIN, self.get_y())
+            self.ln(3)
+            self._set_muted(7)
+            self.multi_cell(USABLE_W, 3.5, self._footer_text)
+
     # ─── Build the full report ──────────────────────────────────
     def build(self, photo_data: Optional[Dict[str, Any]] = None) -> bytes:
         """
@@ -855,6 +927,10 @@ def generate_report_pdf(
     closing_notes: str = "",
     user_email: str = "",
     plan: str = "free",
+    # ── Phase 1: per-company report settings ─────────────────────
+    brand_colour: str = "#F97316",
+    footer_text: Optional[str] = None,
+    include_rectification: bool = False,
 ) -> bytes:
     """
     Generate a professional site visit report PDF.
@@ -863,6 +939,16 @@ def generate_report_pdf(
       - Free plan: diagonal "VOXSITE · FREE PLAN" watermark on every page,
                    company logo is suppressed (logo is a paid feature).
       - Starter+: no watermark, logo rendered if provided.
+
+    Phase 1 additions (per-company configurable via Settings):
+      - brand_colour: hex '#RRGGBB' that recolours the cover accent bar
+                       and all brand-coloured text. Falls back to orange
+                       on malformed input.
+      - footer_text:  optional paragraph appended at the bottom of the
+                       closing page (disclaimers / company T&Cs).
+      - include_rectification: when True, adds a small signature block
+                       (Rectified on / Rectified by / Signature) under
+                       each OPEN item for contractors to fill in.
     """
     # Import here to avoid circular import with services.plan_limits at module load
     from app.services.plan_limits import has_feature
@@ -886,6 +972,9 @@ def generate_report_pdf(
         closing_notes=closing_notes,
         show_watermark=show_watermark,
         show_logo=show_logo,
+        brand_colour=brand_colour,
+        footer_text=footer_text,
+        include_rectification=include_rectification,
     )
     report.inspector_email = user_email
     return report.build(photo_data=photo_data)

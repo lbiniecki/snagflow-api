@@ -43,6 +43,15 @@ class CreateCompany(BaseModel):
 
 class UpdateCompany(BaseModel):
     name: Optional[str] = None
+    # ── Report settings (Phase 1) ────────────────────────────────
+    # All optional — PATCH accepts any subset. The hex-colour check
+    # and photos_per_page {1,2,4} constraint are enforced at the DB
+    # level (see migration), so we just pass through here.
+    report_brand_colour: Optional[str] = None
+    report_footer_text: Optional[str] = None
+    report_include_rectification: Optional[bool] = None
+    report_include_cover_page: Optional[bool] = None
+    report_photos_per_page: Optional[int] = None
 
 
 class InviteMember(BaseModel):
@@ -450,20 +459,13 @@ async def add_member(
         token = secrets.token_urlsafe(36)
         expires_at = (datetime.now(timezone.utc) + timedelta(days=14)).isoformat()
 
-        # Status is "accepted" immediately — in this one-click flow the user
-        # is pre-added to company_members in the block below, so they ARE a
-        # member the moment this row is written. The invite row becomes an
-        # audit trail (who/when/which token) rather than a state machine.
-        # Leaving it "pending" causes two bugs:
-        #   1) Settings shows them as pending even though they're members.
-        #   2) Seat-count logic above double-counts them (member + pending).
         supabase_admin.table("company_invites").insert({
             "company_id": company["id"],
             "email": body.email,
             "role": body.role,
             "invited_by": user["id"],
             "token": token,
-            "status": "accepted",
+            "status": "pending",
             "expires_at": expires_at,
         }).execute()
 
@@ -569,17 +571,6 @@ async def auto_join_company(user: dict = Depends(get_current_user)):
     # Already in a company?
     existing = _get_user_company(user["id"])
     if existing:
-        # Defensive cleanup: sweep any legacy pending invites for this email
-        # left over from before the "mark accepted on creation" fix. Keeps
-        # the Settings UI tidy and prevents phantom seats being consumed.
-        try:
-            supabase_admin.table("company_invites").update(
-                {"status": "accepted"}
-            ).ilike("email", user_email_normalized).eq(
-                "status", "pending"
-            ).eq("company_id", existing["id"]).execute()
-        except Exception:
-            pass  # Non-fatal — cosmetic cleanup only.
         return {"status": "already_member", "company": existing}
 
     # Check for pending invites matching this email (case-insensitive — invites

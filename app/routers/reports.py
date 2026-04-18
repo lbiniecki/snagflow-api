@@ -62,6 +62,91 @@ async def _download_photo(url: str) -> bytes | None:
     return None
 
 
+async def _get_company_settings(user_id: str) -> dict:
+    """
+    Fetch everything the PDF renderer needs about the user's company in
+    ONE query: logo bytes, name, and all report_* settings.
+
+    Returns a dict with keys:
+      - logo_bytes: Optional[bytes]
+      - name: str
+      - brand_colour: str (#RRGGBB)
+      - footer_text: Optional[str]
+      - include_rectification: bool
+      - include_cover_page: bool
+      - photos_per_page: int
+
+    Safe against missing company: returns sensible defaults so the PDF
+    still renders if, for some reason, the user has no company yet.
+    """
+    defaults = {
+        "logo_bytes": None,
+        "name": "",
+        "brand_colour": "#F97316",
+        "footer_text": None,
+        "include_rectification": False,
+        "include_cover_page": True,
+        "photos_per_page": 2,
+    }
+
+    cols = (
+        "logo_path, name, "
+        "report_brand_colour, report_footer_text, "
+        "report_include_rectification, report_include_cover_page, "
+        "report_photos_per_page"
+    )
+
+    try:
+        # Owned company first
+        company = (
+            supabase_admin.table("companies")
+            .select(cols)
+            .eq("owner_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        row = company.data[0] if company.data else None
+
+        # Fall back to membership
+        if not row:
+            mem = (
+                supabase_admin.table("company_members")
+                .select(f"companies({cols})")
+                .eq("user_id", user_id)
+                .limit(1)
+                .execute()
+            )
+            if mem.data and mem.data[0].get("companies"):
+                row = mem.data[0]["companies"]
+
+        if not row:
+            return defaults
+
+        # Resolve logo bytes (signed URL → download) if a logo_path exists
+        logo_bytes = None
+        logo_path = row.get("logo_path")
+        if logo_path:
+            try:
+                url_res = supabase_admin.storage.from_("company-logos").create_signed_url(logo_path, 300)
+                url = url_res.get("signedURL") or url_res.get("signedUrl")
+                if url:
+                    logo_bytes = await _download_photo(url)
+            except Exception:
+                pass  # Non-fatal — render without logo.
+
+        return {
+            "logo_bytes": logo_bytes,
+            "name": row.get("name") or "",
+            "brand_colour": row.get("report_brand_colour") or defaults["brand_colour"],
+            "footer_text": row.get("report_footer_text"),
+            "include_rectification": bool(row.get("report_include_rectification", False)),
+            "include_cover_page": row.get("report_include_cover_page", True) is not False,
+            "photos_per_page": int(row.get("report_photos_per_page") or 2),
+        }
+    except Exception:
+        return defaults
+
+
 async def _get_company_logo(user_id: str) -> bytes | None:
     """Fetch the company logo bytes for branding."""
     try:
@@ -263,9 +348,10 @@ async def _build_project_report_pdf(
 
         snags.append({**s, "photo_url": photo_url})
 
-    # Company logo & name
-    logo_bytes = await _get_company_logo(user["id"])
-    company_name = await _get_company_name(user["id"])
+    # Company settings — logo, name, branding, report toggles (Phase 1)
+    settings = await _get_company_settings(user["id"])
+    logo_bytes = settings["logo_bytes"]
+    company_name = settings["name"]
 
     # Inspector / plan
     profile_name = await _get_inspector_name(user["id"])
@@ -290,6 +376,10 @@ async def _build_project_report_pdf(
         closing_notes=visit_data.get("closing_notes", "") if visit_data else "",
         user_email=user.get("email", ""),
         plan=plan_slug,
+        # Phase 1 — per-company report settings
+        brand_colour=settings["brand_colour"],
+        footer_text=settings["footer_text"],
+        include_rectification=settings["include_rectification"],
     )
 
     # Summary (used by email body; GET endpoint doesn't strictly need it but
