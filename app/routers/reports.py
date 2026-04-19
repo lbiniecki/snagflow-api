@@ -296,6 +296,19 @@ async def _build_project_report_pdf(
             if not visit_no:
                 visit_no = str(visit_data.get("visit_no", ""))
 
+    # Resolve display number for the PDF body. visit_ref is an optional
+    # user override (e.g. "MIL-V01", "2026/04/13"). When blank, we fall
+    # back to the integer visit_no. The filename helper uses visit_no
+    # directly regardless — filenames stay stable even if the user
+    # changes their display scheme mid-project.
+    visit_display = ""
+    if visit_data:
+        raw_ref = (visit_data.get("visit_ref") or "").strip()
+        if raw_ref:
+            visit_display = raw_ref
+    if not visit_display:
+        visit_display = visit_no  # falls back to the integer
+
     # Snags
     query = (
         supabase_admin.table("snags")
@@ -367,6 +380,7 @@ async def _build_project_report_pdf(
         photo_data=photo_data,
         weather=weather,
         visit_no=visit_no,
+        visit_display=visit_display,
         attendees=visit_data.get("attendees", "") if visit_data else "",
         access_notes=visit_data.get("access_notes", "") if visit_data else "",
         company_name=company_name,

@@ -116,6 +116,7 @@ class SiteVisitReport(FPDF):
         inspector: str = "",
         logo_bytes: Optional[bytes] = None,
         visit_no: str = "",
+        visit_display: str = "",  # optional override for human-facing display
         weather: str = "",
         attendees: str = "",
         access_notes: str = "",
@@ -137,6 +138,12 @@ class SiteVisitReport(FPDF):
         self.inspector = inspector
         self.inspector_email = ""  # set separately
         self.visit_no = visit_no or "1"
+        # visit_display is what the user sees on the page. Falls back to
+        # the numeric visit_no when no ref was set. Never used for the
+        # internal doc_ref (which stays based on the integer so filenames
+        # and references remain stable even when the user changes their
+        # display scheme mid-project).
+        self.visit_display = (visit_display or "").strip() or self.visit_no
         self.weather = weather
         self.attendees = attendees
         self.access_notes = access_notes
@@ -286,7 +293,7 @@ class SiteVisitReport(FPDF):
         p_code = self.project.get("name", "")
         left = f"{p_code}  |  Ref: {self.doc_ref}"
         self.cell(USABLE_W / 3, 5, left, align="L")
-        self.cell(USABLE_W / 3, 5, f"Site visit No {self.visit_no}", align="C")
+        self.cell(USABLE_W / 3, 5, f"Site visit No {self.visit_display}", align="C")
         self.cell(USABLE_W / 3, 5, f"{self.page_no()}", align="R")
 
     # ─── Helpers ────────────────────────────────────────────────
@@ -367,7 +374,7 @@ class SiteVisitReport(FPDF):
         # Visit and issue number
         self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 14)
         self.set_text_color(*DARK)
-        self.cell(0, 8, f"Site visit No. {self.visit_no}  |  Issue No. {self.visit_no}", ln=True)
+        self.cell(0, 8, f"Site visit No. {self.visit_display}  |  Issue No. {self.visit_display}", ln=True)
         self.ln(2)
 
         # Document reference
@@ -409,7 +416,7 @@ class SiteVisitReport(FPDF):
         c1 = USABLE_W * 0.15  # labels
         c2 = USABLE_W * 0.35  # values
         self._table_cell(c1, "Issue No:", h=10, bold=True, fill=True)
-        self._table_cell(c2, self.visit_no, h=10)
+        self._table_cell(c2, self.visit_display, h=10)
         self._table_cell(c1, "Date:", h=10, bold=True, fill=True)
         self._table_cell(c2, datetime.now().strftime("%d/%m/%Y"), h=10)
         self.ln()
@@ -917,6 +924,7 @@ def generate_report_pdf(
     logo_bytes: Optional[bytes] = None,
     photo_data: Optional[Dict[str, Any]] = None,
     visit_no: str = "",
+    visit_display: str = "",
     weather: str = "",
     attendees: str = "",
     access_notes: str = "",
@@ -962,6 +970,7 @@ def generate_report_pdf(
         inspector=inspector_email,
         logo_bytes=logo_bytes,
         visit_no=visit_no,
+        visit_display=visit_display,
         weather=weather,
         attendees=attendees,
         access_notes=access_notes,

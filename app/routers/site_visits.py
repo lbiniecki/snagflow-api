@@ -13,6 +13,7 @@ router = APIRouter()
 
 class CreateVisit(BaseModel):
     project_id: str
+    visit_ref: Optional[str] = None  # Optional display override (e.g. "MIL-V01")
     weather: str = ""
     inspector: str = ""
     attendees: str = ""
@@ -24,6 +25,7 @@ class CreateVisit(BaseModel):
 
 
 class UpdateVisit(BaseModel):
+    visit_ref: Optional[str] = None
     weather: Optional[str] = None
     status: Optional[str] = None
     inspector: Optional[str] = None
@@ -136,11 +138,20 @@ async def create_visit(
     )
     next_no = (latest.data[0]["visit_no"] + 1) if latest.data else 1
 
+    # Normalise visit_ref: treat whitespace-only as None so the UI's
+    # "leave blank for default" hint actually works correctly.
+    visit_ref_clean: Optional[str] = None
+    if body.visit_ref is not None:
+        stripped = body.visit_ref.strip()
+        if stripped:
+            visit_ref_clean = stripped[:50]  # matches DB CHECK constraint
+
     visit = (
         supabase_admin.table("site_visits")
         .insert({
             "project_id": body.project_id,
             "visit_no": next_no,
+            "visit_ref": visit_ref_clean,
             "weather": body.weather,
             "inspector": body.inspector or user.get("email", ""),
             "attendees": body.attendees,
@@ -173,7 +184,15 @@ async def update_visit(
     if not visit.data or visit.data.get("projects", {}).get("user_id") != user["id"]:
         raise HTTPException(status_code=404, detail="Visit not found")
 
+    # Standard "drop None" — lets clients send partial updates without
+    # wiping other fields. But visit_ref is a special case: the UI needs
+    # to be able to clear the override, which we signal with an empty
+    # string. We flip empty → None → store as NULL.
     updates = {k: v for k, v in body.dict().items() if v is not None}
+    if "visit_ref" in updates:
+        ref_val = (updates["visit_ref"] or "").strip()
+        updates["visit_ref"] = ref_val[:50] if ref_val else None
+
     if not updates:
         return visit.data
 
