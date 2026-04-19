@@ -40,7 +40,14 @@ async def list_visits(
     project_id: str,
     user: dict = Depends(get_current_user),
 ):
-    """List all site visits for a project, newest first."""
+    """
+    List all site visits for a project, newest first.
+
+    Response includes snag_count / open_count / closed_count for each
+    visit so the UI can render summary pills without a second round-trip.
+    Counts are computed client-side after a single SELECT of this
+    project's snags — much faster than N per-visit queries.
+    """
     # Verify project ownership
     proj = (
         supabase_admin.table("projects")
@@ -60,7 +67,44 @@ async def list_visits(
         .order("visit_no", desc=True)
         .execute()
     )
-    return visits.data
+    visit_rows = visits.data or []
+
+    # Fetch all snags for this project in ONE query, then group by visit_id.
+    # Cheap for typical project sizes (tens to low hundreds of items);
+    # switching to a per-visit count() query would be N round-trips.
+    counts_by_visit: dict[str, dict[str, int]] = {}
+    if visit_rows:
+        try:
+            snags = (
+                supabase_admin.table("snags")
+                .select("visit_id, status")
+                .eq("project_id", project_id)
+                .execute()
+            )
+            for row in (snags.data or []):
+                vid = row.get("visit_id")
+                if not vid:
+                    continue
+                bucket = counts_by_visit.setdefault(
+                    vid, {"snag_count": 0, "open_count": 0, "closed_count": 0}
+                )
+                bucket["snag_count"] += 1
+                if row.get("status") == "closed":
+                    bucket["closed_count"] += 1
+                else:
+                    bucket["open_count"] += 1
+        except Exception:
+            # Non-fatal — if the snag query fails we still return visits
+            # without counts. Frontend treats missing counts as "no pills".
+            pass
+
+    # Merge counts onto visit rows. Missing visit_ids default to zero.
+    enriched = []
+    for v in visit_rows:
+        counts = counts_by_visit.get(v["id"], {"snag_count": 0, "open_count": 0, "closed_count": 0})
+        enriched.append({**v, **counts})
+
+    return enriched
 
 
 @router.post("/")
