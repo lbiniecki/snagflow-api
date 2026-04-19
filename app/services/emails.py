@@ -353,26 +353,30 @@ async def send_subscription_confirmation_email(
     # What the plan unlocks — sourced from the same plan_limits shape used
     # on the pricing screen, kept here as short marketing copy.
     perks_by_plan = {
+        "solo": [
+            "5 projects, 100 items/month",
+            "Company logo + brand colour on PDF reports",
+            "Email reports directly to clients",
+            "Rectification sign-off blocks on every report",
+            "No VoxSite watermark",
+        ],
         "starter": [
             "Up to 3 team members",
-            "5 projects, 100 items/month",
-            "Company logo on PDF reports",
-            "No VoxSite watermark",
+            "15 projects, 300 items/month",
+            "Everything in Solo",
         ],
         "team": [
             "Up to 10 team members",
-            "15 projects, 500 items/month",
-            "Email PDF reports to clients",
-            "Company logo on PDF reports",
+            "50 projects, 1,000 items/month",
+            "Everything in Starter",
         ],
         "pro": [
-            "Up to 25 team members",
+            "Up to 30 team members",
             "Unlimited projects & items",
-            "Email PDF reports to clients",
             "Everything in Team",
         ],
         "business": [
-            "Up to 50 team members",
+            "Up to 75 team members",
             "Unlimited projects & items",
             "Priority support",
             "Everything in Pro",
@@ -380,6 +384,7 @@ async def send_subscription_confirmation_email(
         "enterprise": [
             "Unlimited team members",
             "Unlimited everything",
+            "Individual report templates",
             "Dedicated support",
         ],
     }

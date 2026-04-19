@@ -2,7 +2,7 @@
 Plan limits — single source of truth for what each pricing tier allows.
 
 Shape:
-  limits:    numeric caps (users, projects, snags/month)
+  limits:    numeric caps (users, projects, items/month)
   features:  boolean feature flags (watermark, email, logo)
 
 Everything (API, billing webhook, PDF generator, pricing screen) reads
@@ -27,8 +27,8 @@ class PlanLimits(TypedDict):
 
 class PlanFeatures(TypedDict):
     pdf_watermark: bool   # Free plan only — adds "VOXSITE · FREE PLAN" across every page
-    email_reports: bool   # Team+ — send PDF report by email
-    company_logo: bool    # Starter+ — render company logo on PDF cover/header
+    email_reports: bool   # Solo+ (unlocked earlier in 2026 pricing refresh)
+    company_logo: bool    # Solo+ — renders company logo + brand colour on PDF
 
 
 class Plan(TypedDict):
@@ -38,13 +38,28 @@ class Plan(TypedDict):
     features: PlanFeatures
 
 
+# ─── Pricing matrix (April 2026 refresh) ─────────────────────────
+#
+# Changes vs original launch:
+#   - Added Solo tier (€12/mo) for one-person shops
+#   - Email reports + logo + rectification unlocked from Solo (was Team+)
+#   - Starter:  100 → 300 items/month (more realistic for active inspectors)
+#   - Team:     500 → 1000 items/month, UNLIMITED → 50 projects
+#               (caps added to create upgrade pressure toward Pro)
+#   - Pro:      25 → 30 users, still unlimited projects/items
+#   - Business: 50 → 75 users
+#   - Free:     2 → 1 project (Solo is the clear first-paid step now)
+#
+# All monetary amounts live in Stripe, not here — this dict only
+# describes LIMITS and FEATURES.
+
 PLANS: dict[str, Plan] = {
     "free": {
         "slug": "free",
         "name": "Free",
         "limits": {
             "max_users": 1,
-            "max_projects": 2,
+            "max_projects": 1,
             "max_snags_per_month": 20,
         },
         "features": {
@@ -53,17 +68,31 @@ PLANS: dict[str, Plan] = {
             "company_logo": False,
         },
     },
-    "starter": {
-        "slug": "starter",
-        "name": "Starter",
+    "solo": {
+        "slug": "solo",
+        "name": "Solo",
         "limits": {
-            "max_users": 3,
+            "max_users": 1,
             "max_projects": 5,
             "max_snags_per_month": 100,
         },
         "features": {
             "pdf_watermark": False,
-            "email_reports": False,
+            "email_reports": True,
+            "company_logo": True,
+        },
+    },
+    "starter": {
+        "slug": "starter",
+        "name": "Starter",
+        "limits": {
+            "max_users": 3,
+            "max_projects": 15,
+            "max_snags_per_month": 300,
+        },
+        "features": {
+            "pdf_watermark": False,
+            "email_reports": True,
             "company_logo": True,
         },
     },
@@ -72,8 +101,8 @@ PLANS: dict[str, Plan] = {
         "name": "Team",
         "limits": {
             "max_users": 10,
-            "max_projects": 15,
-            "max_snags_per_month": 500,
+            "max_projects": 50,
+            "max_snags_per_month": 1000,
         },
         "features": {
             "pdf_watermark": False,
@@ -85,7 +114,7 @@ PLANS: dict[str, Plan] = {
         "slug": "pro",
         "name": "Pro",
         "limits": {
-            "max_users": 25,
+            "max_users": 30,
             "max_projects": UNLIMITED,
             "max_snags_per_month": UNLIMITED,
         },
@@ -99,7 +128,7 @@ PLANS: dict[str, Plan] = {
         "slug": "business",
         "name": "Business",
         "limits": {
-            "max_users": 50,
+            "max_users": 75,
             "max_projects": UNLIMITED,
             "max_snags_per_month": UNLIMITED,
         },

@@ -35,18 +35,27 @@ if not _STRIPE_WEBHOOK_SECRET and not _ALLOW_UNSIGNED_WEBHOOKS:
         "(or export VOXSITE_ENV=development for local testing)."
     )
 
-# Price ID → plan name mapping
+# Price ID → plan name mapping.
+#
+# April 2026 refresh: completely refreshed pricing. Old VoxSite prices
+# (€24/49/99/179) are archived in Stripe and intentionally absent here,
+# so any dormant checkout session holding an old price ID will fail
+# validation in create_checkout. That's the safe outcome — we'd rather
+# reject a stale checkout than silently let someone subscribe at the
+# old price.
 PRICE_TO_PLAN = {
-    # Monthly
-    "price_1TM9TGIzCuyhGXgYAI34UPiO": "starter",
-    "price_1TM9U3IzCuyhGXgYIFVd7fs1": "team",
-    "price_1TM9USIzCuyhGXgY8gYqlcMP": "pro",
-    "price_1TM9UlIzCuyhGXgYCVxWXZsC": "business",
-    # Annual
-    "price_1TM9aIIzCuyhGXgY9TeUq3ch": "starter",
-    "price_1TM9akIzCuyhGXgYmbDAHROz": "team",
-    "price_1TM9bJIzCuyhGXgYEpO1hAUF": "pro",
-    "price_1TM9bmIzCuyhGXgYv9aUGOGR": "business",
+    # ── Monthly ──────────────────────────────────────────────────
+    "price_1TNyLGIzCuyhGXgYJyUyNFoq": "solo",
+    "price_1TNySxIzCuyhGXgY6gKc3Yxt": "starter",
+    "price_1TNyUtIzCuyhGXgYZyfhzQoQ": "team",
+    "price_1TNyWUIzCuyhGXgYyUrkzDZ4": "pro",
+    "price_1TNyYiIzCuyhGXgYhOtdqwNy": "business",
+    # ── Annual ───────────────────────────────────────────────────
+    "price_1TNyPrIzCuyhGXgYvxlOVm8F": "solo",
+    "price_1TNyTqIzCuyhGXgY2ma0qffR": "starter",
+    "price_1TNyVVIzCuyhGXgYACbR2R44": "team",
+    "price_1TNyXiIzCuyhGXgY4RbeEf6U": "pro",
+    "price_1TNyZbIzCuyhGXgY2kiwRDs0": "business",
 }
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "https://voxsite.app")
@@ -635,7 +644,7 @@ async def _send_subscription_email(
     plan_name = new_plan.get("name") or new_plan_slug.title()
 
     # Is this an upgrade or a downgrade?
-    tier = ["free", "starter", "team", "pro", "business", "enterprise"]
+    tier = ["free", "solo", "starter", "team", "pro", "business", "enterprise"]
     try:
         is_upgrade = tier.index(new_plan_slug) >= tier.index(old_plan_slug)
     except ValueError:
