@@ -2,6 +2,7 @@
 Stripe billing router — checkout sessions, webhooks, customer portal.
 """
 import os
+from typing import Optional
 import stripe
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -9,7 +10,7 @@ from app.services.auth_dep import get_current_user
 from app.services.supabase_client import supabase_admin
 from app.services.plan_limits import PLANS, get_plan, get_limits, is_unlimited, MAX_PHOTOS_PER_SNAG
 from app.services.plan_enforcement import get_company_plan
-from app.services.emails import send_subscription_confirmation_email
+from app.services.emails import send_subscription_confirmation_email, send_payment_failed_email
 from datetime import datetime, timezone
 
 router = APIRouter()
@@ -277,6 +278,10 @@ async def stripe_webhook(request: Request):
         await _handle_subscription_change(data)
     elif event_type == "customer.subscription.deleted":
         await _handle_subscription_cancelled(data)
+    elif event_type == "invoice.payment_failed":
+        await _handle_payment_failed(data)
+    elif event_type == "invoice.payment_succeeded":
+        await _handle_payment_succeeded(data)
 
     return {"received": True}
 
@@ -340,12 +345,31 @@ async def _handle_subscription_change(data):
 
 
 async def _handle_subscription_cancelled(data):
-    """Downgrade to free on cancellation."""
+    """
+    Downgrade to free on cancellation.
+
+    ── Enterprise guard (audit #6) ───────────────────────────────
+    Enterprise customers are managed manually (plan='enterprise' set
+    directly in Supabase; no matching Stripe price ID). If a Stripe
+    subscription ever gets cancelled for an Enterprise account — whether
+    by mistake, by us migrating them off Stripe, or by a test event — we
+    do NOT auto-downgrade. Manual intervention only.
+
+    ── Downgrade soft-lock semantics (audit #4) ──────────────────
+    When downgrading to free, we intentionally do NOT delete or hide
+    existing data:
+      - All current team members remain in company_members.
+      - All existing projects, visits, and items remain accessible.
+      - Only NEW additions hit the free-plan caps (add_member refuses
+        past max_users=1, check_project_limit refuses past 2 projects,
+        etc.).
+    This is the industry norm (Notion, Linear, Figma all soft-lock) and
+    is more customer-friendly than hard truncation. If a customer
+    reactivates, everything picks up where they left off.
+    """
     customer_id = data.get("customer")
     if not customer_id:
         return
-
-    free_max_users = get_limits("free")["max_users"]
 
     company = (
         supabase_admin.table("companies")
@@ -361,10 +385,26 @@ async def _handle_subscription_cancelled(data):
     old_plan_slug = company_row.get("plan") or "free"
     owner_id = company_row.get("owner_id")
 
+    # Enterprise guard — don't auto-downgrade manually-managed accounts.
+    # Log the skip so there's a breadcrumb in Railway logs if Ops ever
+    # needs to trace what happened.
+    if old_plan_slug == "enterprise":
+        print(f"[billing] Skipping auto-downgrade of Enterprise customer {customer_id} — manual review required")
+        return
+
+    free_max_users = get_limits("free")["max_users"]
+
+    # Apply the downgrade. Also clear the past_due state since the sub
+    # is now fully cancelled (past_due is a transient state that only
+    # applies to active subscriptions being retried).
     supabase_admin.table("companies").update({
         "plan": "free",
         "max_users": free_max_users,
         "stripe_subscription_id": None,
+        "subscription_status": "canceled",
+        "past_due_since": None,
+        "past_due_last_notified_at": None,
+        "past_due_invoice_id": None,
     }).eq("id", company_row["id"]).execute()
 
     # Send downgrade notice (but not if they were already on free)
@@ -374,6 +414,169 @@ async def _handle_subscription_cancelled(data):
             new_plan_slug="free",
             old_plan_slug=old_plan_slug,
         )
+
+
+async def _handle_payment_failed(data):
+    """
+    Handle invoice.payment_failed from Stripe.
+
+    Design goals (per max-security session decisions):
+      1. Flag past_due atomically, so the UI banner appears on next page load.
+      2. Email the owner — BUT only once per invoice (per-invoice dedup via
+         past_due_invoice_id + past_due_last_notified_at). Stripe retries the
+         invoice up to 4 times; without dedup the owner would get spammed.
+      3. Do NOT downgrade the plan. Members keep working normally during the
+         Stripe retry window. Only when the subscription is actually cancelled
+         (deleted webhook) do limits degrade.
+      4. Email send failures are caught — they must never block the DB
+         state transition. If we can flag past_due but not email, the UI
+         banner will at least surface the problem.
+    """
+    customer_id = data.get("customer")
+    if not customer_id:
+        return
+
+    invoice_id = data.get("id") or ""
+    amount_due = data.get("amount_due")  # in minor currency units (e.g. cents)
+    currency = (data.get("currency") or "").upper()
+    next_payment_attempt = data.get("next_payment_attempt")  # unix ts or None
+
+    # Look up the company by Stripe customer id.
+    company = (
+        supabase_admin.table("companies")
+        .select("id, plan, owner_id, subscription_status, past_due_invoice_id, past_due_last_notified_at")
+        .eq("stripe_customer_id", customer_id)
+        .limit(1)
+        .execute()
+    )
+    if not company.data:
+        return
+
+    company_row = company.data[0]
+    company_id = company_row["id"]
+    old_plan_slug = company_row.get("plan") or "free"
+    owner_id = company_row.get("owner_id")
+
+    # Enterprise guard — skip. Their billing is not through Stripe proper.
+    if old_plan_slug == "enterprise":
+        return
+
+    # Decide whether to email. Email exactly once per invoice (not once per
+    # retry attempt). If the invoice_id matches what we've already notified
+    # about, skip the email. If it's a DIFFERENT invoice (customer had a
+    # later one also fail), reset and send a fresh notification.
+    already_notified_for_this_invoice = (
+        company_row.get("past_due_invoice_id") == invoice_id
+        and company_row.get("past_due_last_notified_at") is not None
+    )
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    # Update DB first — state transition is the source of truth for the UI.
+    # If past_due_since is already set (we're already in past_due state from
+    # an earlier retry of this same invoice), don't overwrite it.
+    update_fields = {
+        "subscription_status": "past_due",
+        "past_due_invoice_id": invoice_id,
+    }
+    if not company_row.get("past_due_since"):
+        update_fields["past_due_since"] = now_iso
+    # Also check: if the invoice changed, this is a fresh failure — reset
+    # the "since" timestamp so the banner counts from now, not from the
+    # previous invoice.
+    if company_row.get("past_due_invoice_id") and company_row["past_due_invoice_id"] != invoice_id:
+        update_fields["past_due_since"] = now_iso
+
+    supabase_admin.table("companies").update(update_fields).eq("id", company_id).execute()
+
+    # Email — best-effort, wrapped in try/except so a Resend outage doesn't
+    # break the webhook response (which would trigger Stripe retries).
+    if not already_notified_for_this_invoice and owner_id:
+        try:
+            email, first_name = _get_user_email_and_name(owner_id)
+            if email:
+                # Format amount like "€49.00" if we have enough info
+                amount_formatted: Optional[str] = None
+                if isinstance(amount_due, (int, float)) and currency:
+                    symbols = {"EUR": "€", "USD": "$", "GBP": "£"}
+                    sym = symbols.get(currency, currency + " ")
+                    amount_formatted = f"{sym}{amount_due / 100:.2f}"
+
+                # Format next retry date if provided
+                next_retry_at: Optional[str] = None
+                if isinstance(next_payment_attempt, (int, float)) and next_payment_attempt > 0:
+                    try:
+                        next_retry_at = datetime.fromtimestamp(
+                            next_payment_attempt, tz=timezone.utc
+                        ).strftime("%d %b %Y")
+                    except (ValueError, OSError):
+                        pass
+
+                portal_url = f"{FRONTEND_URL}/#pricing"
+
+                plan_display = get_plan(old_plan_slug).get("name") or old_plan_slug.title()
+
+                sent = await send_payment_failed_email(
+                    to_email=email,
+                    first_name=first_name,
+                    plan_name=plan_display,
+                    amount_formatted=amount_formatted,
+                    next_retry_at=next_retry_at,
+                    portal_url=portal_url,
+                )
+
+                # Only record the notification timestamp if the send actually
+                # succeeded. That way, if Resend was down and we retry via a
+                # later Stripe webhook, we'll try to email again.
+                if sent:
+                    supabase_admin.table("companies").update({
+                        "past_due_last_notified_at": now_iso,
+                    }).eq("id", company_id).execute()
+        except Exception as e:
+            # Any email-pipeline failure — log and continue. The DB is
+            # already updated, so the UI banner will surface the issue.
+            print(f"[billing] payment_failed email failed for company {company_id}: {e}")
+
+
+async def _handle_payment_succeeded(data):
+    """
+    Handle invoice.payment_succeeded from Stripe.
+
+    When a customer's retried payment finally goes through (or any
+    invoice succeeds), clear the past_due state so the banner
+    disappears and the "last notified" dedup resets.
+
+    Only acts if the company is currently past_due — a successful
+    payment on an already-active subscription is a normal renewal
+    and needs no action here.
+    """
+    customer_id = data.get("customer")
+    if not customer_id:
+        return
+
+    company = (
+        supabase_admin.table("companies")
+        .select("id, subscription_status")
+        .eq("stripe_customer_id", customer_id)
+        .limit(1)
+        .execute()
+    )
+    if not company.data:
+        return
+
+    company_row = company.data[0]
+
+    # Only act if there's actually past_due state to clear. Normal
+    # renewal payments on active subs shouldn't trigger any writes.
+    if company_row.get("subscription_status") != "past_due":
+        return
+
+    supabase_admin.table("companies").update({
+        "subscription_status": "active",
+        "past_due_since": None,
+        "past_due_last_notified_at": None,
+        "past_due_invoice_id": None,
+    }).eq("id", company_row["id"]).execute()
 
 
 # ─── Subscription-email helper ──────────────────────────────────

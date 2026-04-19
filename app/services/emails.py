@@ -441,3 +441,110 @@ async def send_subscription_confirmation_email(
             {"name": "plan", "value": plan_slug.lower()},
         ],
     )
+
+
+async def send_payment_failed_email(
+    *,
+    to_email: str,
+    first_name: Optional[str] = None,
+    plan_name: str,
+    amount_formatted: Optional[str] = None,
+    next_retry_at: Optional[str] = None,
+    portal_url: Optional[str] = None,
+) -> bool:
+    """
+    Sent when Stripe reports that an invoice payment failed.
+
+    Behaviour promises to the recipient:
+      - Their subscription is NOT cancelled yet — Stripe will retry.
+      - Their team keeps working normally during the retry period.
+      - If they update their card, retries should succeed automatically.
+      - If retries all fail, the subscription will be cancelled and the
+        team reverts to the Free plan.
+
+    Tone is informative, not alarming. Most payment failures are
+    transient (card expired, bank glitch, insufficient funds at a
+    specific moment) and resolve when Stripe retries.
+
+    Args:
+      plan_name:          e.g. "Team" — the plan they're currently on
+      amount_formatted:   optional "€49.00" string — shown if provided
+      next_retry_at:      optional "27 Apr 2026" — shown if provided
+      portal_url:         direct Stripe portal link (recommended)
+    """
+    greeting = f"Hi {_html.escape(first_name.strip())}," if first_name and first_name.strip() else "Hi,"
+
+    plan_safe = _html.escape(plan_name)
+    amount_line = ""
+    if amount_formatted:
+        amount_line = f'<p><strong>Amount:</strong> {_html.escape(amount_formatted)}</p>'
+
+    retry_line = ""
+    if next_retry_at:
+        retry_line = (
+            f'<p style="color: #6B7280; font-size: 14px;">'
+            f"We'll automatically retry the payment on "
+            f"<strong>{_html.escape(next_retry_at)}</strong>."
+            f"</p>"
+        )
+
+    manage_link_html = ""
+    if portal_url:
+        # Primary CTA is the portal — but also include a plain-text
+        # link for email clients that block buttons.
+        manage_link_html = (
+            f'<p style="margin-top: 16px; color: #6B7280; font-size: 13px;">'
+            f'Or copy this link: '
+            f'<a href="{_html.escape(portal_url)}" style="color: #D97706;">'
+            f'{_html.escape(portal_url)}</a>'
+            f"</p>"
+        )
+
+    title = "Payment issue with your VoxSite subscription"
+    preheader = f"We couldn't process the payment for your {plan_name} plan — update your card to stay subscribed."
+
+    body = f"""
+      <p>{greeting}</p>
+      <p>
+        We weren't able to charge your card for the latest
+        <strong>{plan_safe}</strong> invoice.
+      </p>
+      {amount_line}
+      <p style="margin-top: 16px;">
+        <strong>What happens now?</strong>
+      </p>
+      <ul style="padding-left: 20px; line-height: 1.7;">
+        <li>Your subscription is <strong>still active</strong> — your team can keep working normally.</li>
+        <li>Stripe will automatically retry the payment a few times over the coming weeks.</li>
+        <li>If all retries fail, your subscription will be cancelled and you'll drop to the Free plan.</li>
+      </ul>
+      {retry_line}
+      <p style="margin-top: 16px;">
+        The quickest fix is usually to update your card. Common causes
+        are an expired card, a new card number after a reissue, or
+        temporary insufficient funds.
+      </p>
+      {manage_link_html}
+    """
+
+    # CTA goes to the Stripe portal where they can update their card.
+    # Falls back to the app home if we somehow didn't get a portal URL.
+    cta_url = portal_url or settings.APP_URL
+
+    html = render_email(
+        title=title,
+        preheader=preheader,
+        body_html=body,
+        cta_label="Update payment method",
+        cta_url=cta_url,
+    )
+
+    return await send_email(
+        to=to_email,
+        subject=title,
+        html=html,
+        reply_to=settings.SUPPORT_EMAIL,
+        tags=[
+            {"name": "category", "value": "payment_failed"},
+        ],
+    )
