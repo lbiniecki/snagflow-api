@@ -260,7 +260,13 @@ async def delete_visit(
     visit_id: str,
     user: dict = Depends(get_current_user),
 ):
-    """Delete a site visit and all its snags."""
+    """
+    Delete a site visit and all its snags + their photos.
+
+    Same pattern as project deletion: collect photo paths first,
+    remove from Storage (best-effort), then delete DB rows. Otherwise
+    orphan photo files silently accrue in Supabase Storage.
+    """
     visit = (
         supabase_admin.table("site_visits")
         .select("*, projects!inner(user_id)")
@@ -271,9 +277,29 @@ async def delete_visit(
     if not visit.data or visit.data.get("projects", {}).get("user_id") != user["id"]:
         raise HTTPException(status_code=404, detail="Visit not found")
 
-    # Delete snags first
+    # ── 1. Collect photo paths from all snags in this visit ──
+    snag_rows = (
+        supabase_admin.table("snags")
+        .select("photo_path, photo_path_2, photo_path_3, photo_path_4")
+        .eq("visit_id", visit_id)
+        .execute()
+    )
+    photo_paths: list[str] = []
+    for row in (snag_rows.data or []):
+        for col in ("photo_path", "photo_path_2", "photo_path_3", "photo_path_4"):
+            path = row.get(col)
+            if path:
+                photo_paths.append(path)
+
+    # ── 2. Best-effort storage cleanup ──
+    if photo_paths:
+        try:
+            supabase_admin.storage.from_("snag-photos").remove(photo_paths)
+        except Exception as e:
+            print(f"[site_visits] Photo cleanup failed for visit {visit_id}: {e}")
+
+    # ── 3. Delete DB rows (existing behaviour) ──
     supabase_admin.table("snags").delete().eq("visit_id", visit_id).execute()
-    # Delete visit
     supabase_admin.table("site_visits").delete().eq("id", visit_id).execute()
 
     return {"ok": True}

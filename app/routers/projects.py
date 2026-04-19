@@ -163,7 +163,20 @@ async def update_project(
 
 @router.delete("/{project_id}", status_code=204)
 async def delete_project(project_id: str, user: dict = Depends(get_current_user)):
-    """Delete a project and all its snags."""
+    """
+    Delete a project and all its snags, site visits, and snag photos.
+
+    Order matters: photos must be removed from Supabase Storage BEFORE
+    the snag rows are deleted, because the photo paths live on the
+    snag rows. Once rows are gone, we've lost the pointers and those
+    storage files become orphans (silently accruing on your storage
+    bill forever).
+
+    Storage cleanup is best-effort: if the remove() call fails (network
+    issue, rate limit, etc.), we log and continue with the DB deletion.
+    Orphan photos are a minor cost leak; a stuck "delete" button is a
+    user-facing bug. Better to ship the deletion.
+    """
     existing = (
         supabase_admin.table("projects")
         .select("id")
@@ -174,7 +187,31 @@ async def delete_project(project_id: str, user: dict = Depends(get_current_user)
     if not existing.data:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # Delete snags, site visits, then the project (cascade)
+    # ── 1. Collect every photo path linked to snags in this project ──
+    # Snags use 4 slots: photo_path, photo_path_2, photo_path_3, photo_path_4.
+    # Any / all may be null depending on how many photos the user attached.
+    snag_rows = (
+        supabase_admin.table("snags")
+        .select("photo_path, photo_path_2, photo_path_3, photo_path_4")
+        .eq("project_id", project_id)
+        .execute()
+    )
+    photo_paths: list[str] = []
+    for row in (snag_rows.data or []):
+        for col in ("photo_path", "photo_path_2", "photo_path_3", "photo_path_4"):
+            path = row.get(col)
+            if path:
+                photo_paths.append(path)
+
+    # ── 2. Best-effort storage cleanup ──
+    # Batch remove — Supabase Storage accepts a list and deletes all in one call.
+    if photo_paths:
+        try:
+            supabase_admin.storage.from_("snag-photos").remove(photo_paths)
+        except Exception as e:
+            print(f"[projects] Photo cleanup failed for project {project_id}: {e}")
+
+    # ── 3. Delete DB rows (existing behaviour) ──
     supabase_admin.table("snags").delete().eq("project_id", project_id).execute()
     supabase_admin.table("site_visits").delete().eq("project_id", project_id).execute()
     supabase_admin.table("projects").delete().eq("id", project_id).execute()
