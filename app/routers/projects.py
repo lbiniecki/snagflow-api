@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.models.schemas import ProjectCreate, ProjectUpdate, ProjectResponse
 from app.services.auth_dep import get_current_user
 from app.services.supabase_client import supabase_admin
-from app.services.plan_enforcement import check_project_limit
+from app.services.plan_enforcement import check_project_limit, get_company_plan
 from typing import List
 
 router = APIRouter()
@@ -60,11 +60,17 @@ async def create_project(
     # Plan limit check
     await check_project_limit(user["id"])
 
+    # Resolve which company this project belongs to. For solo free
+    # users this returns (None) and company_id stays NULL, matching
+    # the solo counting path in plan_enforcement.
+    _plan, company_id = await get_company_plan(user["id"])
+
     data = {
         "name": project.name.strip()[:MAX_NAME_LEN],
         "client": (project.client or "").strip()[:MAX_FIELD_LEN],
         "address": (project.address or "").strip()[:MAX_FIELD_LEN],
         "user_id": user["id"],
+        "company_id": company_id,
     }
     res = supabase_admin.table("projects").insert(data).execute()
     if not res.data:

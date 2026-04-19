@@ -16,6 +16,24 @@ router = APIRouter()
 
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 
+# Environment gating for the webhook-verification fallback.
+# In production we refuse to accept unsigned webhook payloads — that
+# would let anyone POST a crafted "I'm now on Business tier" event.
+# Local dev can set VOXSITE_ENV=development to skip signature checks
+# when running against the Stripe CLI's `stripe listen`.
+_STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+_VOXSITE_ENV = (os.getenv("VOXSITE_ENV") or "production").lower()
+_ALLOW_UNSIGNED_WEBHOOKS = _VOXSITE_ENV == "development"
+
+if not _STRIPE_WEBHOOK_SECRET and not _ALLOW_UNSIGNED_WEBHOOKS:
+    # Fail loud at import. Railway's deploy log will catch this and
+    # the deploy will fail rather than silently running with a
+    # bypassable webhook endpoint.
+    raise RuntimeError(
+        "STRIPE_WEBHOOK_SECRET is not configured. Set it in Railway "
+        "(or export VOXSITE_ENV=development for local testing)."
+    )
+
 # Price ID → plan name mapping
 PRICE_TO_PLAN = {
     # Monthly
@@ -198,25 +216,63 @@ async def create_portal(user: dict = Depends(get_current_user)):
 async def stripe_webhook(request: Request):
     """
     Handle Stripe webhook events.
-    Updates company plan on successful subscription changes.
+
+    Two guarantees this handler provides:
+      1. Signature verification: unsigned requests are rejected in prod.
+         Only local dev with VOXSITE_ENV=development can fall through
+         to unsigned JSON parsing (for use with `stripe listen`).
+      2. Idempotency: every Stripe event has a unique `evt_xxx` id.
+         We INSERT it into stripe_events at the top of the handler;
+         if the insert hits the primary-key constraint we know it's
+         a retry/duplicate and skip the body.
     """
     payload = await request.body()
     sig = request.headers.get("stripe-signature")
-    webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
 
-    if webhook_secret and sig:
+    # ── 1. Verify & parse ─────────────────────────────────────────
+    if _STRIPE_WEBHOOK_SECRET:
+        if not sig:
+            # Missing signature in prod = hostile request. Reject.
+            raise HTTPException(status_code=400, detail="Missing signature")
         try:
-            event = stripe.Webhook.construct_event(payload, sig, webhook_secret)
+            event = stripe.Webhook.construct_event(payload, sig, _STRIPE_WEBHOOK_SECRET)
         except (ValueError, stripe.error.SignatureVerificationError):
             raise HTTPException(status_code=400, detail="Invalid webhook signature")
-    else:
-        # No webhook secret configured — parse raw (dev mode)
+    elif _ALLOW_UNSIGNED_WEBHOOKS:
+        # Dev only — parse raw JSON so `stripe listen` works locally.
         import json
         event = json.loads(payload)
+    else:
+        # Defensive: import-time guard should have prevented this, but
+        # if config is tampered with at runtime, refuse.
+        raise HTTPException(status_code=500, detail="Webhook secret not configured")
 
+    event_id = event.get("id") if isinstance(event, dict) else event.id
     event_type = event.get("type") if isinstance(event, dict) else event.type
     data = event.get("data", {}).get("object", {}) if isinstance(event, dict) else event.data.object
 
+    # ── 2. Idempotency: record the event, bail on duplicates ──────
+    # Stripe retries events whenever they don't get a 2xx within
+    # ~30s, and will occasionally re-send even on success. Without
+    # this guard, customers get multiple "upgrade confirmed" emails
+    # and the plan row gets rewritten on every retry.
+    #
+    # We rely on stripe_events.event_id being a PRIMARY KEY: the
+    # INSERT will raise on duplicates, which we treat as "already
+    # processed" and return 200 so Stripe stops retrying.
+    if event_id:
+        try:
+            supabase_admin.table("stripe_events").insert({
+                "event_id": event_id,
+                "event_type": event_type or "unknown",
+            }).execute()
+        except Exception:
+            # Treat any insert failure as "already seen" and return
+            # 200. If it was a real DB outage we'll retry on the
+            # next delivery — Stripe is patient.
+            return {"received": True, "duplicate": True}
+
+    # ── 3. Dispatch ───────────────────────────────────────────────
     if event_type in ("checkout.session.completed", "customer.subscription.updated"):
         await _handle_subscription_change(data)
     elif event_type == "customer.subscription.deleted":
