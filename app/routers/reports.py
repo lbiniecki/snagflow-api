@@ -504,11 +504,38 @@ async def get_report(
     )
 
     filename = _report_filename(result.project_name, result.visit_no)
+    pdf_bytes = result.pdf_bytes
+
+    # Return the PDF as a file download. Notes on headers:
+    #   - attachment disposition forces browsers to download instead of
+    #     rendering inline. This is what desktop browsers honour; iOS is
+    #     inconsistent here (often opens in-browser anyway), but setting it
+    #     doesn't hurt and helps Android Chrome.
+    #   - filename uses both `filename=` (legacy ASCII) and `filename*=UTF-8`
+    #     (RFC 5987) so non-ASCII project names render correctly on all
+    #     browsers. The legacy value is sanitized ASCII-safe by the
+    #     `_report_filename` helper upstream.
+    #   - Content-Length lets the browser show a download progress bar
+    #     (otherwise mobile users see "Generating..." indefinitely even
+    #     after the bytes are in flight).
+    #   - Access-Control-Expose-Headers lets client JS read the filename
+    #     from the response if it wants to (we don't today, but harmless).
+    from urllib.parse import quote
+    filename_ascii = filename.encode("ascii", "ignore").decode("ascii") or "report.pdf"
+    content_disposition = (
+        f'attachment; filename="{filename_ascii}"; '
+        f"filename*=UTF-8''{quote(filename)}"
+    )
 
     return StreamingResponse(
-        BytesIO(result.pdf_bytes),
+        BytesIO(pdf_bytes),
         media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={
+            "Content-Disposition": content_disposition,
+            "Content-Length": str(len(pdf_bytes)),
+            "Access-Control-Expose-Headers": "Content-Disposition, Content-Length",
+            "Cache-Control": "no-store",
+        },
     )
 
 
