@@ -864,209 +864,99 @@ class SiteVisitReport(FPDF):
         is_first: bool,
     ):
         """
-        Original two-column layout: split header (Item number | Action required),
-        up to 2 photos stacked in the left column, description + metadata +
-        rectification in the right column. Photos 3-4 overflow to a second page.
-        This path is intentionally unchanged — it is the tested default.
+        Single-column full-width layout optimised for 2 photos side-by-side:
+          item header strip → description + metadata → 1x2 photo grid →
+          rectification block (full width at bottom).
+
+        Replaces an earlier 62%/38% split layout that broke when photos were
+        taller than ~3:4 (the common iPhone portrait aspect) — in that case
+        two stacked photos in the left column exceeded the page height,
+        triggered an auto-page-break mid-column, and orphaned the right-
+        column description + rectification onto the next page next to an
+        empty left column.
+
+        Photos 3-4 spill to a continuation page using the same 1x2 grid;
+        description and rectification are not repeated on overflow pages.
         """
-        self.add_page()
+        self.add_page(orientation="P")
+
+        usable_w = USABLE_W
+        page_bottom = PAGE_H - 25
 
         if is_first:
             self._set_body(9)
             self.cell(0, 6, "List of items requiring attention:", ln=True)
             self.ln(2)
 
-        photo_w = USABLE_W * 0.62
-        action_w = USABLE_W * 0.38
+        # Item header strip (full width)
+        y_hdr = self.get_y()
+        strip_bottom = self._draw_item_header_strip(MARGIN, y_hdr, usable_w, item_no, is_closed)
+        self.set_y(strip_bottom + 1)
 
-        # ── Header row ──
-        hdr_y = self.get_y()
-        hdr_h = 9
-        self.set_fill_color(*HEADER_GREY)
-        self.set_draw_color(*BORDER)
-        self.rect(MARGIN, hdr_y, photo_w, hdr_h, "DF")
-        self.rect(MARGIN + photo_w, hdr_y, action_w, hdr_h, "DF")
-        self.set_xy(MARGIN, hdr_y + 1)
-        self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 9)
-        self.set_text_color(*DARK)
-        self.cell(photo_w, 7, "Item number", align="C")
-        self.set_xy(MARGIN + photo_w, hdr_y + 1)
-        self.cell(action_w, 7, "Action required", align="C")
-        self.set_y(hdr_y + hdr_h)
-        y_content = self.get_y()
+        # Description + metadata (full width)
+        desc_top = self.get_y()
+        desc_bottom = self._render_desc_and_meta(MARGIN, desc_top, usable_w, snag) + 3
 
-        # ── Item number row ──
-        self.set_xy(MARGIN, y_content)
-        self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 11)
-        self.set_text_color(*BLACK)
-        self.set_draw_color(*BORDER)
-        num_text = f"{item_no:02d}"
-        if is_closed:
-            num_text += "  [CLOSED]"
-        self.cell(photo_w, 8, num_text, border="LR")
-        self.ln()
-        sep_y = self.get_y()
-        self.set_draw_color(*LIGHT_GREY)
-        self.line(MARGIN + 2, sep_y, MARGIN + photo_w - 2, sep_y)
-
-        # ── Photo sizing ──
-        photo_inner_w = photo_w - 8
-        caption_h = 5
-        gap = 3
-
+        # Split photos: up to 2 on primary, up to 2 more on overflow
         photos_page1 = photos_list[:2]
         photos_page2 = photos_list[2:4]
 
-        avail_h = PAGE_H - 25 - (sep_y + 2)
-        n_p1 = len(photos_page1)
-        if n_p1 >= 2:
-            max_per_photo = (avail_h - caption_h * 2 - gap) / 2
-        elif n_p1 == 1:
-            max_per_photo = avail_h - caption_h
-        else:
-            max_per_photo = 80
+        # Reserve rectification space at the bottom (if enabled + open)
+        rect_needed = 28 if (self._include_rectification and not is_closed) else 0
 
-        cur_y = sep_y + 2
+        # 1x2 grid — photos side-by-side on one row between desc and rect
+        grid_top = desc_bottom
+        grid_bottom = page_bottom - rect_needed - 2
+        grid_h = grid_bottom - grid_top
 
-        def _render_photos_left_col(photo_list, start_idx, cur_y, max_h):
-            for pi, p_bytes in enumerate(photo_list):
-                rendered = False
-                try:
-                    tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
-                    tmp.write(p_bytes)
-                    tmp.flush()
-                    pw, ph = self._get_image_size(p_bytes)
-                    render_w, render_h = self._fit_dimensions(pw, ph, photo_inner_w, max_h)
-                    img_x = MARGIN + 4 + (photo_inner_w - render_w) / 2
-                    self.image(tmp.name, x=img_x, y=cur_y, w=render_w, h=render_h)
-                    img_bottom = cur_y + render_h
-                    rendered = True
-                    self.set_xy(MARGIN, img_bottom + 1)
-                    self.set_font("DejaVu" if self._use_unicode else "Helvetica", "I", 7.5)
-                    self.set_text_color(*MID_GREY)
-                    self.cell(photo_w, caption_h, f"Photo {item_no}.{start_idx + pi + 1}", align="C")
-                    cur_y = img_bottom + 1 + caption_h + gap
-                except Exception:
-                    if not rendered:
-                        self.set_xy(MARGIN, cur_y)
-                        self._set_muted(9)
-                        self.cell(photo_w, 20, f"[Photo {item_no}.{start_idx + pi + 1} unavailable]", align="C")
-                        cur_y += 20 + gap
-                    else:
-                        cur_y = cur_y + max_h + gap
-            return cur_y
+        cell_gap = 4
+        caption_h = 5
+        cell_w = (usable_w - cell_gap) / 2
+        photo_max_h = grid_h - caption_h - 1
 
         if photos_page1:
-            cur_y = _render_photos_left_col(photos_page1, 0, cur_y, max_per_photo)
-            self.set_y(cur_y)
-        else:
-            self.set_xy(MARGIN, cur_y)
-            self._set_muted(10)
-            self.cell(photo_w, 80, "[No photo]", align="C")
-            self.set_y(cur_y + 80)
-
-        photo_bottom = self.get_y()
-
-        # ── Action text (right column) ──
-        x_right = MARGIN + photo_w
-        self.set_xy(x_right + 2, y_content + 2)
-        self.set_font("DejaVu" if self._use_unicode else "Helvetica", "", 9)
-        self.set_text_color(*BLACK)
-        self.multi_cell(action_w - 4, 4.5, snag.get("note", "[No description]"))
-        self.ln(6)
-
-        # Metadata
-        loc = snag.get("location", "")
-        pri = snag.get("priority", "medium")
-        status = snag.get("status", "open")
-        meta = []
-        if loc:
-            meta.append(f"Location: {loc}")
-        meta.append(f"Priority: {pri.upper()}")
-        meta.append(f"Status: {status.upper()}")
-        date_str = snag.get("created_at", "")[:10] if snag.get("created_at") else ""
-        if date_str:
-            meta.append(f"Date: {date_str}")
-
-        if is_closed:
-            self.set_x(x_right + 2)
-            self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 8)
-            self.set_text_color(*GREEN)
-            self.cell(action_w - 4, 5, "CLOSED", ln=True)
-
-        self.set_font("DejaVu" if self._use_unicode else "Helvetica", "", 7)
-        self.set_text_color(*MID_GREY)
-        for m in meta:
-            self.set_x(x_right + 2)
-            self.multi_cell(action_w - 4, 3.5, m)
-
-        text_bottom = self.get_y()
-
-        # ── Rectification (right column) ──
-        if self._include_rectification and not is_closed:
-            rect_top = text_bottom + 3
-            rect_inner_x = x_right + 2
-            rect_inner_w = action_w - 4
-            line_gap = 6
-
-            self.set_draw_color(*LIGHT_GREY)
-            self.line(rect_inner_x, rect_top, rect_inner_x + rect_inner_w, rect_top)
-
-            self.set_xy(rect_inner_x, rect_top + 1.5)
-            self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 7)
-            self.set_text_color(*DARK)
-            self.cell(rect_inner_w, 3.5, "RECTIFICATION", ln=True)
-
-            fields = [
-                "Rectified on:  ____ / ____ / ________",
-                "Rectified by:  _________________________",
-                "Signature:     _________________________",
+            positions = [
+                (MARGIN, grid_top),
+                (MARGIN + cell_w + cell_gap, grid_top),
             ]
-            self.set_font("DejaVu" if self._use_unicode else "Helvetica", "", 7)
-            self.set_text_color(*BLACK)
-            for fld in fields:
-                self.set_x(rect_inner_x)
-                self.cell(rect_inner_w, line_gap, fld, ln=True)
+            for pi, p_bytes in enumerate(photos_page1):
+                gx, gy = positions[pi]
+                self._render_photo_fit(
+                    gx, gy, cell_w, photo_max_h,
+                    p_bytes, f"Photo {item_no}.{pi + 1}",
+                )
+        else:
+            self.set_xy(MARGIN, grid_top)
+            self._set_muted(10)
+            self.cell(usable_w, 40, "[No photos]", align="C", border=1)
 
-            text_bottom = self.get_y() + 1
+        # Rectification block — anchored at bottom, full width
+        if self._include_rectification and not is_closed:
+            self._render_rectification_block(MARGIN, grid_bottom + 2, usable_w)
 
-        # ── Column borders ──
-        bottom = max(photo_bottom, text_bottom) + 4
-        self.set_draw_color(*BORDER)
-        self.rect(MARGIN, y_content, photo_w, bottom - y_content)
-        self.rect(MARGIN + photo_w, y_content, action_w, bottom - y_content)
-
-        # ── Overflow page for photos 3-4 ──
+        # Overflow page for photos 3-4 — same 1x2 grid, no desc/rect repeat
         if photos_page2:
-            self.add_page()
+            self.add_page(orientation="P")
             self._set_body(9)
             self.cell(0, 6, f"Item {item_no:02d} - continued", ln=True)
             self.ln(2)
-            overflow_y = self.get_y()
-            overflow_avail = PAGE_H - 25 - overflow_y
-            n_p2 = len(photos_page2)
-            max_p2 = (overflow_avail - caption_h * n_p2 - gap) / max(n_p2, 1)
-            cur_y = overflow_y
+
+            cont_top = self.get_y() + 2
+            cont_bottom = page_bottom - 4
+            cont_h = cont_bottom - cont_top
+            cont_photo_max_h = cont_h - caption_h - 1
+
+            positions = [
+                (MARGIN, cont_top),
+                (MARGIN + cell_w + cell_gap, cont_top),
+            ]
             for pi, p_bytes in enumerate(photos_page2):
-                try:
-                    tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
-                    tmp.write(p_bytes)
-                    tmp.flush()
-                    pw, ph = self._get_image_size(p_bytes)
-                    render_w, render_h = self._fit_dimensions(pw, ph, photo_inner_w, max_p2)
-                    img_x = MARGIN + 4 + (photo_inner_w - render_w) / 2
-                    self.image(tmp.name, x=img_x, y=cur_y, w=render_w, h=render_h)
-                    img_bottom = cur_y + render_h
-                    self.set_xy(MARGIN, img_bottom + 1)
-                    self.set_font("DejaVu" if self._use_unicode else "Helvetica", "I", 7.5)
-                    self.set_text_color(*MID_GREY)
-                    self.cell(photo_w, caption_h, f"Photo {item_no}.{2 + pi + 1}", align="C")
-                    cur_y = img_bottom + 1 + caption_h + gap
-                except Exception:
-                    self.set_xy(MARGIN, cur_y)
-                    self._set_muted(9)
-                    self.cell(photo_w, 20, f"[Photo {item_no}.{2 + pi + 1} unavailable]", align="C")
-                    cur_y += 20 + gap
+                gx, gy = positions[pi]
+                self._render_photo_fit(
+                    gx, gy, cell_w, cont_photo_max_h,
+                    p_bytes, f"Photo {item_no}.{pi + 3}",
+                )
+
 
     # ───────────────────────────────────────────────────────────
     # Mode: 1 photo per page — portrait, single column
