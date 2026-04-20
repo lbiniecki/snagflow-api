@@ -44,15 +44,16 @@ class CreateCompany(BaseModel):
 class UpdateCompany(BaseModel):
     name: Optional[str] = None
     # ── Report settings (Phase 1) ────────────────────────────────
-    # All optional — PATCH accepts any subset. The hex-colour check
-    # and photos_per_page {1,2,4} constraint are enforced at the DB
-    # level (see migration), so we just pass through here.
+    # All optional — PATCH accepts any subset. The hex-colour check,
+    # photos_per_page {1,2,4} constraint, and title_align {center,left}
+    # check are enforced at the DB level (see migrations), so we just
+    # pass through here.
     report_brand_colour: Optional[str] = None
     report_footer_text: Optional[str] = None
     report_include_rectification: Optional[bool] = None
     report_include_cover_page: Optional[bool] = None
     report_photos_per_page: Optional[int] = None
-
+    report_title_align: Optional[str] = None
 
 class InviteMember(BaseModel):
     email: str
