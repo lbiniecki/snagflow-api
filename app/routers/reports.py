@@ -75,6 +75,7 @@ async def _get_company_settings(user_id: str) -> dict:
       - include_rectification: bool
       - include_cover_page: bool
       - photos_per_page: int
+      - title_align: str ('center' | 'left')
 
     Safe against missing company: returns sensible defaults so the PDF
     still renders if, for some reason, the user has no company yet.
@@ -87,13 +88,14 @@ async def _get_company_settings(user_id: str) -> dict:
         "include_rectification": False,
         "include_cover_page": True,
         "photos_per_page": 2,
+        "title_align": "center",
     }
 
     cols = (
         "logo_path, name, "
         "report_brand_colour, report_footer_text, "
         "report_include_rectification, report_include_cover_page, "
-        "report_photos_per_page"
+        "report_photos_per_page, report_title_align"
     )
 
     try:
@@ -134,6 +136,11 @@ async def _get_company_settings(user_id: str) -> dict:
             except Exception:
                 pass  # Non-fatal — render without logo.
 
+        # Validate title_align — DB CHECK should enforce this, but be defensive
+        # in case the migration hasn't run yet (column missing → .get returns None).
+        title_align_raw = (row.get("report_title_align") or "center").strip().lower()
+        title_align = title_align_raw if title_align_raw in ("center", "left") else "center"
+
         return {
             "logo_bytes": logo_bytes,
             "name": row.get("name") or "",
@@ -142,6 +149,7 @@ async def _get_company_settings(user_id: str) -> dict:
             "include_rectification": bool(row.get("report_include_rectification", False)),
             "include_cover_page": row.get("report_include_cover_page", True) is not False,
             "photos_per_page": int(row.get("report_photos_per_page") or 2),
+            "title_align": title_align,
         }
     except Exception:
         return defaults
@@ -394,6 +402,9 @@ async def _build_project_report_pdf(
         brand_colour=settings["brand_colour"],
         footer_text=settings["footer_text"],
         include_rectification=settings["include_rectification"],
+        # Phase 2 — layout mode + cover alignment
+        photos_per_page=settings["photos_per_page"],
+        title_align=settings["title_align"],
     )
 
     # Summary (used by email body; GET endpoint doesn't strictly need it but

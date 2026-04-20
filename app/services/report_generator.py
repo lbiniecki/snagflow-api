@@ -131,6 +131,9 @@ class SiteVisitReport(FPDF):
         brand_colour: str = "#F97316",
         footer_text: Optional[str] = None,
         include_rectification: bool = False,
+        # ── Phase 2: layout mode + cover alignment ───────────────
+        photos_per_page: int = 2,
+        title_align: str = "center",
     ):
         super().__init__()
         self.project = project
@@ -166,6 +169,11 @@ class SiteVisitReport(FPDF):
         self._brand_rgb = _hex_to_rgb(brand_colour)
         self._footer_text = (footer_text or "").strip()
         self._include_rectification = bool(include_rectification)
+        # Phase 2 — layout mode: clamp to {1, 2, 4} with 2 as fallback
+        self._photos_per_page = photos_per_page if photos_per_page in (1, 2, 4) else 2
+        # Phase 2 — cover title alignment: 'center' or 'left'
+        ta = (title_align or "center").strip().lower()
+        self._title_align = ta if ta in ("center", "left") else "center"
         # Document reference: custom or auto-generated
         p_name = project.get("name", "")[:3].upper()
         self.doc_ref = f"{p_name}-SV{self.visit_no.zfill(2)}"
@@ -181,6 +189,11 @@ class SiteVisitReport(FPDF):
                     self.add_font("DejaVu", "B", DEJAVU_BOLD, uni=True)
                 else:
                     self.add_font("DejaVu", "B", DEJAVU_REGULAR, uni=True)
+                # Italic variant — no dedicated italic font on the system,
+                # so fall back to regular. Without this the "I" style is
+                # undefined and any set_font(..., "I", ...) call (used for
+                # photo captions) raises and silently drops the caption.
+                self.add_font("DejaVu", "I", DEJAVU_REGULAR, uni=True)
                 self._use_unicode = True
             except Exception:
                 pass  # fall back to Helvetica
@@ -218,16 +231,19 @@ class SiteVisitReport(FPDF):
 
         if self._is_cover:
             return
+        # Current page width — on landscape pages (4-per-page mode with
+        # majority-landscape photos) self.w is ~297, on portrait ~210.
+        pw = self.w
         # Right-aligned logo or company name
         if self._logo_path:
             try:
-                self.image(self._logo_path, x=PAGE_W - MARGIN - 45, y=8, h=12)
+                self.image(self._logo_path, x=pw - MARGIN - 45, y=8, h=12)
             except Exception:
                 pass
         self.set_y(22)
         self.set_draw_color(*MID_GREY)
         self.set_line_width(0.3)
-        self.line(MARGIN, self.get_y(), PAGE_W - MARGIN, self.get_y())
+        self.line(MARGIN, self.get_y(), pw - MARGIN, self.get_y())
         self.ln(4)
 
     # ─── Watermark (Free plan only) ─────────────────────────────
@@ -254,7 +270,7 @@ class SiteVisitReport(FPDF):
             # Very pale grey so it doesn't overpower content
             self.set_text_color(230, 230, 232)
 
-            cx, cy = PAGE_W / 2, PAGE_H / 2
+            cx, cy = self.w / 2, self.h / 2
             text = "VOXSITE  ·  FREE PLAN"
             cell_w = 200  # wider than any plausible string at 44pt
             cell_h = 20
@@ -283,18 +299,21 @@ class SiteVisitReport(FPDF):
 
     # ─── Footer (all pages) ─────────────────────────────────────
     def footer(self):
+        # Honour current-page width so landscape pages render correctly.
+        pw = self.w
+        usable = pw - 2 * MARGIN
         self.set_y(-18)
         self.set_draw_color(*BORDER)
         self.set_line_width(0.2)
-        self.line(MARGIN, self.get_y(), PAGE_W - MARGIN, self.get_y())
+        self.line(MARGIN, self.get_y(), pw - MARGIN, self.get_y())
         self.set_y(-15)
         self.set_font("DejaVu" if self._use_unicode else "Helvetica", "", 7)
         self.set_text_color(*MID_GREY)
         p_code = self.project.get("name", "")
         left = f"{p_code}  |  Ref: {self.doc_ref}"
-        self.cell(USABLE_W / 3, 5, left, align="L")
-        self.cell(USABLE_W / 3, 5, f"Site visit No {self.visit_display}", align="C")
-        self.cell(USABLE_W / 3, 5, f"{self.page_no()}", align="R")
+        self.cell(usable / 3, 5, left, align="L")
+        self.cell(usable / 3, 5, f"Site visit No {self.visit_display}", align="C")
+        self.cell(usable / 3, 5, f"{self.page_no()}", align="R")
 
     # ─── Helpers ────────────────────────────────────────────────
     def _set_brand(self, size=11, bold=True):
@@ -349,6 +368,10 @@ class SiteVisitReport(FPDF):
             except Exception:
                 y += 5
 
+        # Alignment for title block. "C" centres each line within the
+        # usable width; "L" keeps the old left-aligned layout.
+        ta = "C" if self._title_align == "center" else "L"
+
         # Push project info to mid-page
         self.set_y(PAGE_H * 0.35)
 
@@ -356,41 +379,41 @@ class SiteVisitReport(FPDF):
         if self.company_name:
             self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 14)
             self.set_text_color(*BLACK)
-            self.cell(0, 8, self.company_name, ln=True)
+            self.cell(0, 8, self.company_name, ln=True, align=ta)
             self.ln(4)
 
         # Project name
         self.set_font("DejaVu" if self._use_unicode else "Helvetica", "", 24)
         self.set_text_color(*DARK)
-        self.multi_cell(USABLE_W, 12, self.project.get("name", "[Project Name]"))
+        self.multi_cell(USABLE_W, 12, self.project.get("name", "[Project Name]"), align=ta)
         self.ln(4)
 
         # "SITE VISIT REPORT"
         self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 18)
         self.set_text_color(*DARK)
-        self.cell(0, 10, "SITE VISIT REPORT", ln=True)
+        self.cell(0, 10, "SITE VISIT REPORT", ln=True, align=ta)
         self.ln(2)
 
         # Visit and issue number
         self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 14)
         self.set_text_color(*DARK)
-        self.cell(0, 8, f"Site visit No. {self.visit_display}  |  Issue No. {self.visit_display}", ln=True)
+        self.cell(0, 8, f"Site visit No. {self.visit_display}  |  Issue No. {self.visit_display}", ln=True, align=ta)
         self.ln(2)
 
         # Document reference
         self._set_muted(11)
-        self.cell(0, 6, f"Document Ref: {self.doc_ref}", ln=True)
+        self.cell(0, 6, f"Document Ref: {self.doc_ref}", ln=True, align=ta)
         self.ln(4)
 
         # Client + date
         self._set_muted(10)
         client = self.project.get("client", "")
         if client:
-            self.cell(0, 6, f"Client: {client}", ln=True)
+            self.cell(0, 6, f"Client: {client}", ln=True, align=ta)
         address = self.project.get("address", "")
         if address:
-            self.cell(0, 6, f"Site: {address}", ln=True)
-        self.cell(0, 6, f"Date: {datetime.now().strftime('%d %B %Y')}", ln=True)
+            self.cell(0, 6, f"Site: {address}", ln=True, align=ta)
+        self.cell(0, 6, f"Date: {datetime.now().strftime('%d %B %Y')}", ln=True, align=ta)
 
         # Decorative accent bar at bottom (replaces HP dots + green sidebar)
         self.set_fill_color(*self._brand_rgb)
@@ -635,228 +658,573 @@ class SiteVisitReport(FPDF):
             w = h * ratio
         return w, h
 
+    # ───────────────────────────────────────────────────────────
+    # Shared helpers used by the per-mode renderers below
+    # ───────────────────────────────────────────────────────────
+
+    def _resolve_photos(self, snag: Dict[str, Any], photo_data: Dict[str, Any]) -> List[bytes]:
+        """Normalise a snag's photo_data entry into a list of 0-4 byte blobs."""
+        raw = photo_data.get(snag.get("id", ""))
+        if raw is None:
+            return []
+        if isinstance(raw, (bytes, bytearray)):
+            return [bytes(raw)]
+        if isinstance(raw, list):
+            return raw[:4]
+        return []
+
+    def _count_landscape(self, photos_list: List[bytes]) -> int:
+        """Return count of photos whose width > height. Unknowns treated as portrait."""
+        n = 0
+        for p in photos_list:
+            try:
+                pw, ph = self._get_image_size(p)
+                if pw and ph and pw > ph:
+                    n += 1
+            except Exception:
+                pass
+        return n
+
+    def _render_photo_fit(
+        self,
+        x: float,
+        y: float,
+        max_w: float,
+        max_h: float,
+        p_bytes: bytes,
+        caption: str,
+    ) -> float:
+        """
+        Render one photo fitted inside (max_w x max_h), centred horizontally
+        within max_w, with caption underneath. Returns the y below the caption.
+
+        Image draw and caption draw are in separate try blocks so that a
+        caption failure (e.g. missing italic font variant) does NOT overlay
+        "[... unavailable]" text on a successfully-drawn image.
+        """
+        caption_h = 5
+        image_rendered = False
+        img_bottom = y
+
+        # Image draw
+        try:
+            tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+            tmp.write(p_bytes)
+            tmp.flush()
+            pw, ph = self._get_image_size(p_bytes)
+            render_w, render_h = self._fit_dimensions(pw, ph, max_w, max_h)
+            img_x = x + (max_w - render_w) / 2
+            self.image(tmp.name, x=img_x, y=y, w=render_w, h=render_h)
+            img_bottom = y + render_h
+            image_rendered = True
+        except Exception:
+            # Image failed — draw a placeholder box with the caption text
+            self.set_xy(x, y)
+            self._set_muted(9)
+            self.cell(max_w, 20, f"[{caption} unavailable]", align="C")
+            return y + 20
+
+        # Caption (separate try — a font failure here must not clobber the image)
+        try:
+            self.set_xy(x, img_bottom + 1)
+            self.set_font("DejaVu" if self._use_unicode else "Helvetica", "I", 7.5)
+            self.set_text_color(*MID_GREY)
+            self.cell(max_w, caption_h, caption, align="C")
+            return img_bottom + 1 + caption_h
+        except Exception:
+            # Caption failed — skip silently, just return a cursor below the photo
+            return img_bottom + 1 + caption_h
+
+    def _render_rectification_block(self, x: float, y: float, w: float) -> float:
+        """
+        Render the three-field rectification sign-off block at (x, y) with width w.
+        Returns the y below the block. Styling matches the 2-per-page right-column
+        block so a mixed portfolio of reports looks consistent.
+        """
+        # Light-grey divider above the block
+        self.set_draw_color(*LIGHT_GREY)
+        self.line(x, y, x + w, y)
+
+        # Title
+        self.set_xy(x, y + 1.5)
+        self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 8)
+        self.set_text_color(*DARK)
+        self.cell(w, 4, "RECTIFICATION", ln=True)
+
+        # Three stacked fields
+        fields = [
+            "Rectified on:  ____ / ____ / ________",
+            "Rectified by:  _________________________",
+            "Signature:     _________________________",
+        ]
+        self.set_font("DejaVu" if self._use_unicode else "Helvetica", "", 8)
+        self.set_text_color(*BLACK)
+        line_gap = 6.5
+        for fld in fields:
+            self.set_x(x)
+            self.cell(w, line_gap, fld, ln=True)
+
+        return self.get_y()
+
+    def _draw_item_header_strip(self, x: float, y: float, w: float, item_no: int, is_closed: bool) -> float:
+        """
+        Draw a single full-width item-number strip (used by 1-per-page and
+        4-per-page modes — 2-per-page has its own split header). Returns y
+        below the strip.
+        """
+        hdr_h = 9
+        self.set_fill_color(*HEADER_GREY)
+        self.set_draw_color(*BORDER)
+        self.rect(x, y, w, hdr_h, "DF")
+        self.set_xy(x + 2, y + 1)
+        self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 11)
+        self.set_text_color(*BLACK)
+        label = f"Item {item_no:02d}"
+        if is_closed:
+            label += "     [CLOSED]"
+        self.cell(w - 4, 7, label)
+        return y + hdr_h
+
+    def _render_desc_and_meta(self, x: float, y: float, w: float, snag: Dict[str, Any]) -> float:
+        """
+        Render the full-width description + metadata block. Used by 1-per-page
+        and 4-per-page modes. Returns the y below the block.
+        """
+        # Description
+        self.set_xy(x, y + 2)
+        self.set_font("DejaVu" if self._use_unicode else "Helvetica", "", 9)
+        self.set_text_color(*BLACK)
+        action_text = snag.get("note", "[No description]")
+        self.multi_cell(w, 4.5, action_text)
+        self.ln(1)
+
+        # Metadata line (pipe-separated, compact)
+        loc = snag.get("location", "")
+        pri = snag.get("priority", "medium")
+        status = snag.get("status", "open")
+        date_str = snag.get("created_at", "")[:10] if snag.get("created_at") else ""
+        meta_parts = []
+        if loc:
+            meta_parts.append(f"Location: {loc}")
+        meta_parts.append(f"Priority: {pri.upper()}")
+        meta_parts.append(f"Status: {status.upper()}")
+        if date_str:
+            meta_parts.append(f"Date: {date_str}")
+
+        self.set_font("DejaVu" if self._use_unicode else "Helvetica", "", 7)
+        self.set_text_color(*MID_GREY)
+        self.set_x(x)
+        self.multi_cell(w, 3.5, "   |   ".join(meta_parts))
+        return self.get_y()
+
+    # ───────────────────────────────────────────────────────────
+    # Dispatcher
+    # ───────────────────────────────────────────────────────────
+
     def _build_item_pages(self, photo_data: Dict[str, Any]):
         """
-        Build one page per snag item.
-        Shows ALL snags (open and closed) with status indicator.
-        Uses snag_no for fixed numbering. Supports up to 4 photos.
+        Build snag-item pages. Dispatches to one of three renderers depending on
+        the company's `photos_per_page` setting:
+          1 — portrait-only single column, desc above, photo, rectification below.
+              Photos 2-4 each get a dedicated continuation page.
+          2 — current two-column layout (photos left, description+rectification right).
+              Photos 3-4 overflow to a second page.
+          4 — single-column full-width 2x2 grid. Page orientation auto-switches to
+              landscape when a majority (>=3) of the photos are landscape.
         """
         if not self.snags:
             return
 
-        # Show ALL snags sorted by snag_no (fixed order)
         all_snags = sorted(self.snags, key=lambda s: s.get("snag_no", 0))
+        ppp = self._photos_per_page
 
         for idx, snag in enumerate(all_snags):
-            self.add_page()
-
-            if idx == 0:
-                self._set_body(9)
-                self.cell(0, 6, "List of items requiring attention:", ln=True)
-                self.ln(2)
-
-            photo_w = USABLE_W * 0.62
-            action_w = USABLE_W * 0.38
-
-            # ── Header row ──
-            hdr_y = self.get_y()
-            hdr_h = 9
-            self.set_fill_color(*HEADER_GREY)
-            self.set_draw_color(*BORDER)
-            self.rect(MARGIN, hdr_y, photo_w, hdr_h, "DF")
-            self.rect(MARGIN + photo_w, hdr_y, action_w, hdr_h, "DF")
-            self.set_xy(MARGIN, hdr_y + 1)
-            self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 9)
-            self.set_text_color(*DARK)
-            self.cell(photo_w, 7, "Item number", align="C")
-            self.set_xy(MARGIN + photo_w, hdr_y + 1)
-            self.cell(action_w, 7, "Action required", align="C")
-            self.set_y(hdr_y + hdr_h)
-            y_content = self.get_y()
-
-            # ── Item number row (report-local numbering: 01, 02, 03...) ──
             item_no = idx + 1
             is_closed = snag.get("status") == "closed"
+            photos_list = self._resolve_photos(snag, photo_data)
+            is_first = (idx == 0)
 
-            self.set_xy(MARGIN, y_content)
-            self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 11)
-            self.set_text_color(*BLACK)
-            self.set_draw_color(*BORDER)
-            num_text = f"{item_no:02d}"
-            if is_closed:
-                num_text += "  [CLOSED]"
-            self.cell(photo_w, 8, num_text, border="LR")
-            self.ln()
-            sep_y = self.get_y()
-            self.set_draw_color(*LIGHT_GREY)
-            self.line(MARGIN + 2, sep_y, MARGIN + photo_w - 2, sep_y)
-
-            # ── Resolve photos (up to 4 per snag) ──
-            snag_id = snag.get("id", "")
-            raw = photo_data.get(snag_id)
-            if raw is None:
-                photos_list = []
-            elif isinstance(raw, (bytes, bytearray)):
-                photos_list = [raw]
-            elif isinstance(raw, list):
-                photos_list = raw[:4]  # max 4
+            if ppp == 1:
+                self._build_snag_1_per_page(snag, item_no, is_closed, photos_list, is_first)
+            elif ppp == 4:
+                self._build_snag_4_per_page(snag, item_no, is_closed, photos_list, is_first)
             else:
-                photos_list = []
+                self._build_snag_2_per_page(snag, item_no, is_closed, photos_list, is_first)
 
-            n_photos = len(photos_list)
-            photo_inner_w = photo_w - 8
-            caption_h = 5
-            gap = 3
+    # ───────────────────────────────────────────────────────────
+    # Mode: 2 photos per page — CURRENT LAYOUT, preserved verbatim
+    # ───────────────────────────────────────────────────────────
 
-            # For >2 photos, we'll use 2 per page
-            photos_page1 = photos_list[:2]
-            photos_page2 = photos_list[2:4]
+    def _build_snag_2_per_page(
+        self,
+        snag: Dict[str, Any],
+        item_no: int,
+        is_closed: bool,
+        photos_list: List[bytes],
+        is_first: bool,
+    ):
+        """
+        Original two-column layout: split header (Item number | Action required),
+        up to 2 photos stacked in the left column, description + metadata +
+        rectification in the right column. Photos 3-4 overflow to a second page.
+        This path is intentionally unchanged — it is the tested default.
+        """
+        self.add_page()
 
-            avail_h = PAGE_H - 25 - (sep_y + 2)
-            n_p1 = len(photos_page1)
-            if n_p1 >= 2:
-                max_per_photo = (avail_h - caption_h * 2 - gap) / 2
-            elif n_p1 == 1:
-                max_per_photo = avail_h - caption_h
-            else:
-                max_per_photo = 80
-
-            cur_y = sep_y + 2
-
-            def _render_photos(photo_list, start_idx, cur_y, max_h):
-                for pi, p_bytes in enumerate(photo_list):
-                    rendered = False
-                    try:
-                        tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
-                        tmp.write(p_bytes)
-                        tmp.flush()
-                        pw, ph = self._get_image_size(p_bytes)
-                        render_w, render_h = self._fit_dimensions(pw, ph, photo_inner_w, max_h)
-                        img_x = MARGIN + 4 + (photo_inner_w - render_w) / 2
-                        self.image(tmp.name, x=img_x, y=cur_y, w=render_w, h=render_h)
-                        img_bottom = cur_y + render_h
-                        rendered = True
-                        # Caption under photo
-                        self.set_xy(MARGIN, img_bottom + 1)
-                        self.set_font("DejaVu" if self._use_unicode else "Helvetica", "I", 7.5)
-                        self.set_text_color(*MID_GREY)
-                        self.cell(photo_w, caption_h, f"Photo {item_no}.{start_idx + pi + 1}", align="C")
-                        cur_y = img_bottom + 1 + caption_h + gap
-                    except Exception:
-                        if not rendered:
-                            self.set_xy(MARGIN, cur_y)
-                            self._set_muted(9)
-                            self.cell(photo_w, 20, f"[Photo {item_no}.{start_idx + pi + 1} unavailable]", align="C")
-                            cur_y += 20 + gap
-                        else:
-                            # Photo rendered but caption failed — just skip caption
-                            cur_y = cur_y + max_h + gap
-                return cur_y
-
-            if photos_page1:
-                cur_y = _render_photos(photos_page1, 0, cur_y, max_per_photo)
-                self.set_y(cur_y)
-            else:
-                self.set_xy(MARGIN, cur_y)
-                self._set_muted(10)
-                self.cell(photo_w, 80, "[No photo]", align="C")
-                self.set_y(cur_y + 80)
-
-            photo_bottom = self.get_y()
-
-            # ── Action text (right column) ──
-            self.set_xy(MARGIN + photo_w, y_content)
+        if is_first:
             self._set_body(9)
-            action_text = snag.get("note", "[No description]")
+            self.cell(0, 6, "List of items requiring attention:", ln=True)
+            self.ln(2)
 
-            x_right = MARGIN + photo_w
-            self.set_xy(x_right + 2, y_content + 2)
-            self.set_font("DejaVu" if self._use_unicode else "Helvetica", "", 9)
-            self.set_text_color(*BLACK)
-            self.multi_cell(action_w - 4, 4.5, action_text)
-            self.ln(6)
+        photo_w = USABLE_W * 0.62
+        action_w = USABLE_W * 0.38
 
-            # Metadata block
-            loc = snag.get("location", "")
-            pri = snag.get("priority", "medium")
-            status = snag.get("status", "open")
-            meta = []
-            if loc:
-                meta.append(f"Location: {loc}")
-            meta.append(f"Priority: {pri.upper()}")
-            meta.append(f"Status: {status.upper()}")
-            date_str = snag.get("created_at", "")[:10] if snag.get("created_at") else ""
-            if date_str:
-                meta.append(f"Date: {date_str}")
+        # ── Header row ──
+        hdr_y = self.get_y()
+        hdr_h = 9
+        self.set_fill_color(*HEADER_GREY)
+        self.set_draw_color(*BORDER)
+        self.rect(MARGIN, hdr_y, photo_w, hdr_h, "DF")
+        self.rect(MARGIN + photo_w, hdr_y, action_w, hdr_h, "DF")
+        self.set_xy(MARGIN, hdr_y + 1)
+        self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 9)
+        self.set_text_color(*DARK)
+        self.cell(photo_w, 7, "Item number", align="C")
+        self.set_xy(MARGIN + photo_w, hdr_y + 1)
+        self.cell(action_w, 7, "Action required", align="C")
+        self.set_y(hdr_y + hdr_h)
+        y_content = self.get_y()
 
-            # Status highlight for closed snags
-            if is_closed:
-                self.set_x(x_right + 2)
-                self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 8)
-                self.set_text_color(*GREEN)
-                self.cell(action_w - 4, 5, "CLOSED", ln=True)
+        # ── Item number row ──
+        self.set_xy(MARGIN, y_content)
+        self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 11)
+        self.set_text_color(*BLACK)
+        self.set_draw_color(*BORDER)
+        num_text = f"{item_no:02d}"
+        if is_closed:
+            num_text += "  [CLOSED]"
+        self.cell(photo_w, 8, num_text, border="LR")
+        self.ln()
+        sep_y = self.get_y()
+        self.set_draw_color(*LIGHT_GREY)
+        self.line(MARGIN + 2, sep_y, MARGIN + photo_w - 2, sep_y)
 
+        # ── Photo sizing ──
+        photo_inner_w = photo_w - 8
+        caption_h = 5
+        gap = 3
+
+        photos_page1 = photos_list[:2]
+        photos_page2 = photos_list[2:4]
+
+        avail_h = PAGE_H - 25 - (sep_y + 2)
+        n_p1 = len(photos_page1)
+        if n_p1 >= 2:
+            max_per_photo = (avail_h - caption_h * 2 - gap) / 2
+        elif n_p1 == 1:
+            max_per_photo = avail_h - caption_h
+        else:
+            max_per_photo = 80
+
+        cur_y = sep_y + 2
+
+        def _render_photos_left_col(photo_list, start_idx, cur_y, max_h):
+            for pi, p_bytes in enumerate(photo_list):
+                rendered = False
+                try:
+                    tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+                    tmp.write(p_bytes)
+                    tmp.flush()
+                    pw, ph = self._get_image_size(p_bytes)
+                    render_w, render_h = self._fit_dimensions(pw, ph, photo_inner_w, max_h)
+                    img_x = MARGIN + 4 + (photo_inner_w - render_w) / 2
+                    self.image(tmp.name, x=img_x, y=cur_y, w=render_w, h=render_h)
+                    img_bottom = cur_y + render_h
+                    rendered = True
+                    self.set_xy(MARGIN, img_bottom + 1)
+                    self.set_font("DejaVu" if self._use_unicode else "Helvetica", "I", 7.5)
+                    self.set_text_color(*MID_GREY)
+                    self.cell(photo_w, caption_h, f"Photo {item_no}.{start_idx + pi + 1}", align="C")
+                    cur_y = img_bottom + 1 + caption_h + gap
+                except Exception:
+                    if not rendered:
+                        self.set_xy(MARGIN, cur_y)
+                        self._set_muted(9)
+                        self.cell(photo_w, 20, f"[Photo {item_no}.{start_idx + pi + 1} unavailable]", align="C")
+                        cur_y += 20 + gap
+                    else:
+                        cur_y = cur_y + max_h + gap
+            return cur_y
+
+        if photos_page1:
+            cur_y = _render_photos_left_col(photos_page1, 0, cur_y, max_per_photo)
+            self.set_y(cur_y)
+        else:
+            self.set_xy(MARGIN, cur_y)
+            self._set_muted(10)
+            self.cell(photo_w, 80, "[No photo]", align="C")
+            self.set_y(cur_y + 80)
+
+        photo_bottom = self.get_y()
+
+        # ── Action text (right column) ──
+        x_right = MARGIN + photo_w
+        self.set_xy(x_right + 2, y_content + 2)
+        self.set_font("DejaVu" if self._use_unicode else "Helvetica", "", 9)
+        self.set_text_color(*BLACK)
+        self.multi_cell(action_w - 4, 4.5, snag.get("note", "[No description]"))
+        self.ln(6)
+
+        # Metadata
+        loc = snag.get("location", "")
+        pri = snag.get("priority", "medium")
+        status = snag.get("status", "open")
+        meta = []
+        if loc:
+            meta.append(f"Location: {loc}")
+        meta.append(f"Priority: {pri.upper()}")
+        meta.append(f"Status: {status.upper()}")
+        date_str = snag.get("created_at", "")[:10] if snag.get("created_at") else ""
+        if date_str:
+            meta.append(f"Date: {date_str}")
+
+        if is_closed:
+            self.set_x(x_right + 2)
+            self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 8)
+            self.set_text_color(*GREEN)
+            self.cell(action_w - 4, 5, "CLOSED", ln=True)
+
+        self.set_font("DejaVu" if self._use_unicode else "Helvetica", "", 7)
+        self.set_text_color(*MID_GREY)
+        for m in meta:
+            self.set_x(x_right + 2)
+            self.multi_cell(action_w - 4, 3.5, m)
+
+        text_bottom = self.get_y()
+
+        # ── Rectification (right column) ──
+        if self._include_rectification and not is_closed:
+            rect_top = text_bottom + 3
+            rect_inner_x = x_right + 2
+            rect_inner_w = action_w - 4
+            line_gap = 6
+
+            self.set_draw_color(*LIGHT_GREY)
+            self.line(rect_inner_x, rect_top, rect_inner_x + rect_inner_w, rect_top)
+
+            self.set_xy(rect_inner_x, rect_top + 1.5)
+            self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 7)
+            self.set_text_color(*DARK)
+            self.cell(rect_inner_w, 3.5, "RECTIFICATION", ln=True)
+
+            fields = [
+                "Rectified on:  ____ / ____ / ________",
+                "Rectified by:  _________________________",
+                "Signature:     _________________________",
+            ]
             self.set_font("DejaVu" if self._use_unicode else "Helvetica", "", 7)
-            self.set_text_color(*MID_GREY)
-            for m in meta:
-                self.set_x(x_right + 2)
-                self.multi_cell(action_w - 4, 3.5, m)
+            self.set_text_color(*BLACK)
+            for fld in fields:
+                self.set_x(rect_inner_x)
+                self.cell(rect_inner_w, line_gap, fld, ln=True)
 
-            text_bottom = self.get_y()
+            text_bottom = self.get_y() + 1
 
-            # ── Rectification block (Phase 1 — company toggle) ──
-            # Small signature panel in the action column for contractors
-            # to fill in when the item is physically rectified. Empty
-            # fields by design — the PDF is printed or sent to the
-            # contractor who writes directly on it (or fills it in a
-            # PDF editor) and returns it to the inspector.
-            if self._include_rectification and not is_closed:
-                rect_top = text_bottom + 3
-                rect_inner_x = x_right + 2
-                rect_inner_w = action_w - 4
-                line_gap = 6  # vertical gap between fields
+        # ── Column borders ──
+        bottom = max(photo_bottom, text_bottom) + 4
+        self.set_draw_color(*BORDER)
+        self.rect(MARGIN, y_content, photo_w, bottom - y_content)
+        self.rect(MARGIN + photo_w, y_content, action_w, bottom - y_content)
 
-                # Light-grey divider above the block
-                self.set_draw_color(*LIGHT_GREY)
-                self.line(rect_inner_x, rect_top, rect_inner_x + rect_inner_w, rect_top)
+        # ── Overflow page for photos 3-4 ──
+        if photos_page2:
+            self.add_page()
+            self._set_body(9)
+            self.cell(0, 6, f"Item {item_no:02d} - continued", ln=True)
+            self.ln(2)
+            overflow_y = self.get_y()
+            overflow_avail = PAGE_H - 25 - overflow_y
+            n_p2 = len(photos_page2)
+            max_p2 = (overflow_avail - caption_h * n_p2 - gap) / max(n_p2, 1)
+            cur_y = overflow_y
+            for pi, p_bytes in enumerate(photos_page2):
+                try:
+                    tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+                    tmp.write(p_bytes)
+                    tmp.flush()
+                    pw, ph = self._get_image_size(p_bytes)
+                    render_w, render_h = self._fit_dimensions(pw, ph, photo_inner_w, max_p2)
+                    img_x = MARGIN + 4 + (photo_inner_w - render_w) / 2
+                    self.image(tmp.name, x=img_x, y=cur_y, w=render_w, h=render_h)
+                    img_bottom = cur_y + render_h
+                    self.set_xy(MARGIN, img_bottom + 1)
+                    self.set_font("DejaVu" if self._use_unicode else "Helvetica", "I", 7.5)
+                    self.set_text_color(*MID_GREY)
+                    self.cell(photo_w, caption_h, f"Photo {item_no}.{2 + pi + 1}", align="C")
+                    cur_y = img_bottom + 1 + caption_h + gap
+                except Exception:
+                    self.set_xy(MARGIN, cur_y)
+                    self._set_muted(9)
+                    self.cell(photo_w, 20, f"[Photo {item_no}.{2 + pi + 1} unavailable]", align="C")
+                    cur_y += 20 + gap
 
-                # "Rectification" title
-                self.set_xy(rect_inner_x, rect_top + 1.5)
-                self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 7)
-                self.set_text_color(*DARK)
-                self.cell(rect_inner_w, 3.5, "RECTIFICATION", ln=True)
+    # ───────────────────────────────────────────────────────────
+    # Mode: 1 photo per page — portrait, single column
+    # ───────────────────────────────────────────────────────────
 
-                # Three labelled fields, each with an underline to write on
-                fields = [
-                    "Rectified on:  ____ / ____ / ________",
-                    "Rectified by:  _________________________",
-                    "Signature:     _________________________",
-                ]
-                self.set_font("DejaVu" if self._use_unicode else "Helvetica", "", 7)
-                self.set_text_color(*BLACK)
-                for fld in fields:
-                    self.set_x(rect_inner_x)
-                    self.cell(rect_inner_w, line_gap, fld, ln=True)
+    def _build_snag_1_per_page(
+        self,
+        snag: Dict[str, Any],
+        item_no: int,
+        is_closed: bool,
+        photos_list: List[bytes],
+        is_first: bool,
+    ):
+        """
+        Portrait-locked single-column layout. Primary page shows:
+          item header strip → description + metadata → one big photo → rectification.
+        Photos 2-4 each get their own continuation page (photo only, with caption).
+        Rectification does NOT count against the photos_per_page budget — it
+        appears once on the primary page.
+        """
+        self.add_page(orientation="P")
 
-                text_bottom = self.get_y() + 1
+        if is_first:
+            self._set_body(9)
+            self.cell(0, 6, "List of items requiring attention:", ln=True)
+            self.ln(2)
 
-            # ── Draw borders ──
-            bottom = max(photo_bottom, text_bottom) + 4
-            self.set_draw_color(*BORDER)
-            self.rect(MARGIN, y_content, photo_w, bottom - y_content)
-            self.rect(MARGIN + photo_w, y_content, action_w, bottom - y_content)
+        # Item header strip (full width)
+        y_hdr = self.get_y()
+        strip_bottom = self._draw_item_header_strip(MARGIN, y_hdr, USABLE_W, item_no, is_closed)
+        self.set_y(strip_bottom + 1)
 
-            # ── Overflow page for photos 3-4 ──
-            if photos_page2:
-                self.add_page()
-                self._set_body(9)
-                self.cell(0, 6, f"Item {item_no:02d} - continued", ln=True)
-                self.ln(2)
-                overflow_y = self.get_y()
-                overflow_avail = PAGE_H - 25 - overflow_y
-                n_p2 = len(photos_page2)
-                max_p2 = (overflow_avail - caption_h * n_p2 - gap) / max(n_p2, 1)
-                _render_photos(photos_page2, 2, overflow_y, max_p2)
+        # Description + metadata (full width)
+        desc_top = self.get_y()
+        desc_bottom = self._render_desc_and_meta(MARGIN, desc_top, USABLE_W, snag) + 3
+
+        # Reserve space for rectification block at the page bottom (if applicable).
+        # ~28mm is enough for a heading + 3 underlined fields + padding.
+        rect_needed = 28 if (self._include_rectification and not is_closed) else 0
+
+        # Usable page bottom is page height minus auto-break margin (25mm).
+        page_bottom = PAGE_H - 25
+        photo_top = desc_bottom
+        photo_max_h = page_bottom - photo_top - rect_needed - 4
+
+        if photo_max_h < 40:
+            # Extremely long description pushed the photo too small — fall back
+            # to a guaranteed-minimum size. Rectification may intrude slightly
+            # but this is rare enough (notes longer than ~500 words) not to
+            # block the render.
+            photo_max_h = 40
+
+        # Render primary photo
+        if photos_list:
+            self._render_photo_fit(
+                MARGIN, photo_top, USABLE_W, photo_max_h,
+                photos_list[0], f"Photo {item_no}.1",
+            )
+        else:
+            self.set_xy(MARGIN, photo_top)
+            self._set_muted(10)
+            self.cell(USABLE_W, 30, "[No photo]", align="C", border=1)
+
+        # Rectification — anchored near the page bottom so the photo uses
+        # all remaining space above it.
+        if self._include_rectification and not is_closed:
+            self._render_rectification_block(MARGIN, page_bottom - rect_needed + 2, USABLE_W)
+
+        # Continuation pages for photos 2-4
+        for pi, p_bytes in enumerate(photos_list[1:], start=2):
+            self.add_page(orientation="P")
+            self._set_body(9)
+            self.cell(0, 6, f"Item {item_no:02d} - continued", ln=True)
+            self.ln(2)
+            cont_top = self.get_y()
+            cont_max_h = (PAGE_H - 25) - cont_top - 4
+            self._render_photo_fit(
+                MARGIN, cont_top, USABLE_W, cont_max_h,
+                p_bytes, f"Photo {item_no}.{pi}",
+            )
+
+    # ───────────────────────────────────────────────────────────
+    # Mode: 4 photos per page — full-width 2x2 grid, auto-orient
+    # ───────────────────────────────────────────────────────────
+
+    def _build_snag_4_per_page(
+        self,
+        snag: Dict[str, Any],
+        item_no: int,
+        is_closed: bool,
+        photos_list: List[bytes],
+        is_first: bool,
+    ):
+        """
+        Single-column full-width layout. All 4 photos (or fewer) fit on one page
+        in a 2x2 grid beneath the description. Orientation switches to landscape
+        when at least 3 of the photos are themselves landscape — this gives the
+        photos enough room to breathe without creating a mixed-orientation
+        document when the mix doesn't justify it.
+        """
+        use_landscape = self._count_landscape(photos_list) >= 3
+        self.add_page(orientation="L" if use_landscape else "P")
+
+        pw = self.w
+        ph_page = self.h
+        usable_w = pw - 2 * MARGIN
+        page_bottom = ph_page - 25
+
+        if is_first:
+            self._set_body(9)
+            self.cell(0, 6, "List of items requiring attention:", ln=True)
+            self.ln(2)
+
+        # Item header strip
+        y_hdr = self.get_y()
+        strip_bottom = self._draw_item_header_strip(MARGIN, y_hdr, usable_w, item_no, is_closed)
+        self.set_y(strip_bottom + 1)
+
+        # Description + metadata
+        desc_top = self.get_y()
+        desc_bottom = self._render_desc_and_meta(MARGIN, desc_top, usable_w, snag) + 3
+
+        # Reserve rectification space at the bottom of the page
+        rect_needed = 28 if (self._include_rectification and not is_closed) else 0
+
+        grid_top = desc_bottom
+        grid_bottom = page_bottom - rect_needed - 2
+        grid_h = grid_bottom - grid_top
+
+        # 2x2 grid dimensions
+        cell_gap = 4
+        caption_h = 5
+        cell_w = (usable_w - cell_gap) / 2
+        cell_h = (grid_h - cell_gap) / 2
+        # Photo max-h inside each cell — caption sits below the photo
+        photo_max_h = cell_h - caption_h - 1
+
+        if photos_list:
+            grid_positions = [
+                (MARGIN, grid_top),
+                (MARGIN + cell_w + cell_gap, grid_top),
+                (MARGIN, grid_top + cell_h + cell_gap),
+                (MARGIN + cell_w + cell_gap, grid_top + cell_h + cell_gap),
+            ]
+            for pi, p_bytes in enumerate(photos_list[:4]):
+                gx, gy = grid_positions[pi]
+                self._render_photo_fit(
+                    gx, gy, cell_w, photo_max_h,
+                    p_bytes, f"Photo {item_no}.{pi + 1}",
+                )
+        else:
+            self.set_xy(MARGIN, grid_top)
+            self._set_muted(10)
+            self.cell(usable_w, 40, "[No photos]", align="C", border=1)
+
+        # Rectification — anchored near page bottom
+        if self._include_rectification and not is_closed:
+            self._render_rectification_block(MARGIN, grid_bottom + 2, usable_w)
 
     # ─── Closing Page ───────────────────────────────────────────
     def _build_closing(self):
@@ -939,6 +1307,9 @@ def generate_report_pdf(
     brand_colour: str = "#F97316",
     footer_text: Optional[str] = None,
     include_rectification: bool = False,
+    # ── Phase 2: layout mode + cover alignment ───────────────────
+    photos_per_page: int = 2,
+    title_align: str = "center",
 ) -> bytes:
     """
     Generate a professional site visit report PDF.
@@ -957,6 +1328,15 @@ def generate_report_pdf(
       - include_rectification: when True, adds a small signature block
                        (Rectified on / Rectified by / Signature) under
                        each OPEN item for contractors to fill in.
+
+    Phase 2 additions (per-company configurable via Settings):
+      - photos_per_page: 1, 2 or 4. Drives the per-item page layout mode.
+                       1 = portrait single column (desc → photo → rectification,
+                           with continuation pages for photos 2-4).
+                       2 = current two-column layout (unchanged).
+                       4 = single-column full-width 2x2 grid, auto-orienting
+                           landscape when >=3 of 4 photos are landscape.
+      - title_align:   'center' (default) or 'left' — cover-page text alignment.
     """
     # Import here to avoid circular import with services.plan_limits at module load
     from app.services.plan_limits import has_feature
@@ -984,6 +1364,8 @@ def generate_report_pdf(
         brand_colour=brand_colour,
         footer_text=footer_text,
         include_rectification=include_rectification,
+        photos_per_page=photos_per_page,
+        title_align=title_align,
     )
     report.inspector_email = user_email
     return report.build(photo_data=photo_data)
