@@ -171,9 +171,10 @@ class SiteVisitReport(FPDF):
         self._include_rectification = bool(include_rectification)
         # Phase 2 — layout mode: clamp to {1, 2, 4} with 2 as fallback
         self._photos_per_page = photos_per_page if photos_per_page in (1, 2, 4) else 2
-        # Phase 2 — cover title alignment: 'center' or 'left'
+        # Phase 2 — cover alignment: 'center', 'left' or 'right'. Drives
+        # both the cover logo position and the cover title text alignment.
         ta = (title_align or "center").strip().lower()
-        self._title_align = ta if ta in ("center", "left") else "center"
+        self._title_align = ta if ta in ("center", "left", "right") else "center"
         # Document reference: custom or auto-generated
         p_name = project.get("name", "")[:3].upper()
         self.doc_ref = f"{p_name}-SV{self.visit_no.zfill(2)}"
@@ -200,14 +201,20 @@ class SiteVisitReport(FPDF):
 
         # Write logo bytes to a temp file so fpdf2 can load it
         # Only keep a logo path if the plan allows logo rendering.
+        # Also stash the raw bytes so we can measure the logo's natural
+        # aspect ratio when positioning it (needed for right/center
+        # alignment on the cover).
+        self._logo_bytes: Optional[bytes] = None
         if logo_bytes and show_logo:
             try:
                 self._logo_tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
                 self._logo_tmp.write(logo_bytes)
                 self._logo_tmp.flush()
                 self._logo_path = self._logo_tmp.name
+                self._logo_bytes = logo_bytes
             except Exception:
                 self._logo_path = None
+                self._logo_bytes = None
 
     # ─── Text sanitisation wrappers ─────────────────────────────
     def cell(self, w=0, h=0, txt="", **kwargs):
@@ -359,18 +366,50 @@ class SiteVisitReport(FPDF):
         self._is_cover = True
         self.add_page()
 
-        # Logo
+        # Alignment for the whole cover block — logo AND title text both
+        # follow this setting. "C" / "L" / "R" are fpdf2's cell align
+        # values for the text; logo positioning is computed from the
+        # logo's natural aspect ratio so it lands in the same place
+        # the title text flows to.
+        align_mode = self._title_align  # 'center' | 'left' | 'right'
+        cell_align = {"center": "C", "left": "L", "right": "R"}.get(align_mode, "C")
+
+        # Logo positioning — only height (22mm) is fixed. Width is
+        # computed from the logo's intrinsic aspect ratio so we know
+        # where its right edge is and can left/center/right-pack it
+        # inside the usable width.
         y = 40
         if self._logo_path:
             try:
-                self.image(self._logo_path, x=MARGIN, y=y, h=22)
-                y += 30
+                logo_h = 22.0
+                logo_w = logo_h  # sensible fallback if we can't read dimensions
+                if self._logo_bytes:
+                    iw, ih = self._get_image_size(self._logo_bytes)
+                    if iw and ih and ih > 0:
+                        logo_w = logo_h * (iw / ih)
+
+                # Cap logo width at ~50% of usable so a super-wide logo
+                # doesn't dominate the cover.
+                max_logo_w = USABLE_W * 0.5
+                if logo_w > max_logo_w:
+                    logo_w = max_logo_w
+                    # Preserve aspect ratio by shrinking height to match
+                    if self._logo_bytes:
+                        iw, ih = self._get_image_size(self._logo_bytes)
+                        if iw and ih:
+                            logo_h = logo_w * (ih / iw)
+
+                if align_mode == "left":
+                    logo_x = MARGIN
+                elif align_mode == "right":
+                    logo_x = PAGE_W - MARGIN - logo_w
+                else:  # center
+                    logo_x = (PAGE_W - logo_w) / 2
+
+                self.image(self._logo_path, x=logo_x, y=y, w=logo_w, h=logo_h)
+                y += logo_h + 8
             except Exception:
                 y += 5
-
-        # Alignment for title block. "C" centres each line within the
-        # usable width; "L" keeps the old left-aligned layout.
-        ta = "C" if self._title_align == "center" else "L"
 
         # Push project info to mid-page
         self.set_y(PAGE_H * 0.35)
@@ -379,41 +418,41 @@ class SiteVisitReport(FPDF):
         if self.company_name:
             self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 14)
             self.set_text_color(*BLACK)
-            self.cell(0, 8, self.company_name, ln=True, align=ta)
+            self.cell(0, 8, self.company_name, ln=True, align=cell_align)
             self.ln(4)
 
         # Project name
         self.set_font("DejaVu" if self._use_unicode else "Helvetica", "", 24)
         self.set_text_color(*DARK)
-        self.multi_cell(USABLE_W, 12, self.project.get("name", "[Project Name]"), align=ta)
+        self.multi_cell(USABLE_W, 12, self.project.get("name", "[Project Name]"), align=cell_align)
         self.ln(4)
 
         # "SITE VISIT REPORT"
         self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 18)
         self.set_text_color(*DARK)
-        self.cell(0, 10, "SITE VISIT REPORT", ln=True, align=ta)
+        self.cell(0, 10, "SITE VISIT REPORT", ln=True, align=cell_align)
         self.ln(2)
 
         # Visit and issue number
         self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 14)
         self.set_text_color(*DARK)
-        self.cell(0, 8, f"Site visit No. {self.visit_display}  |  Issue No. {self.visit_display}", ln=True, align=ta)
+        self.cell(0, 8, f"Site visit No. {self.visit_display}  |  Issue No. {self.visit_display}", ln=True, align=cell_align)
         self.ln(2)
 
         # Document reference
         self._set_muted(11)
-        self.cell(0, 6, f"Document Ref: {self.doc_ref}", ln=True, align=ta)
+        self.cell(0, 6, f"Document Ref: {self.doc_ref}", ln=True, align=cell_align)
         self.ln(4)
 
         # Client + date
         self._set_muted(10)
         client = self.project.get("client", "")
         if client:
-            self.cell(0, 6, f"Client: {client}", ln=True, align=ta)
+            self.cell(0, 6, f"Client: {client}", ln=True, align=cell_align)
         address = self.project.get("address", "")
         if address:
-            self.cell(0, 6, f"Site: {address}", ln=True, align=ta)
-        self.cell(0, 6, f"Date: {datetime.now().strftime('%d %B %Y')}", ln=True, align=ta)
+            self.cell(0, 6, f"Site: {address}", ln=True, align=cell_align)
+        self.cell(0, 6, f"Date: {datetime.now().strftime('%d %B %Y')}", ln=True, align=cell_align)
 
         # Decorative accent bar at bottom (replaces HP dots + green sidebar)
         self.set_fill_color(*self._brand_rgb)
@@ -1226,7 +1265,10 @@ def generate_report_pdf(
                        2 = current two-column layout (unchanged).
                        4 = single-column full-width 2x2 grid, auto-orienting
                            landscape when >=3 of 4 photos are landscape.
-      - title_align:   'center' (default) or 'left' — cover-page text alignment.
+      - title_align:   'center' (default), 'left', or 'right'. Drives
+                       both the cover-page logo position AND the cover
+                       text alignment (they move together — the UI
+                       exposes this as 'Cover Alignment').
     """
     # Import here to avoid circular import with services.plan_limits at module load
     from app.services.plan_limits import has_feature
