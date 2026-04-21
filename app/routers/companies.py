@@ -505,7 +505,35 @@ async def remove_member(
     member_id: str,
     user: dict = Depends(get_current_user),
 ):
-    """Remove a member from the company. Owner only. Cannot remove self."""
+    """
+    Remove a member from the company AND fully delete their Supabase
+    account (Auth user, profile, any lingering invite rows, members row).
+    Owner-only. Cannot remove self.
+
+    This is intentionally destructive — clicking the × next to a team
+    member nukes their account everywhere. This matches the current app
+    model where a user can only belong to one company: after being
+    removed from their sole company they have no use-case left, and
+    leaving their Auth record behind would be both a GDPR compliance
+    risk and a source of user confusion ("why can I still log in if
+    I was kicked off the team?"). The frontend MUST show a confirmation
+    dialog before calling this endpoint.
+
+    Deletion order matters:
+      1. Drop the company_members row (removes the FK to the Auth user
+         so subsequent deletes don't cascade-cause issues).
+      2. Delete any company_invites rows for this email (the user may
+         have been added via the pending-invite path).
+      3. Delete the profiles row (gets us the email before we delete
+         the Auth user, since Auth-user-email is the only way to find
+         those invites if profile.email got out of sync).
+      4. Delete the Supabase Auth user last — irreversible.
+
+    Each step is wrapped in try/except. A partial failure leaves the
+    user in an inconsistent state (e.g. Auth user deleted but profile
+    remains) but this is preferable to leaving them fully present when
+    the owner intended to remove them. Errors are logged.
+    """
     company = _get_user_company(user["id"])
     if not company or company["owner_id"] != user["id"]:
         raise HTTPException(status_code=403, detail="Only the owner can remove members")
@@ -521,11 +549,68 @@ async def remove_member(
     if not member.data:
         raise HTTPException(status_code=404, detail="Member not found")
 
-    if member.data["user_id"] == user["id"]:
+    target_user_id = member.data["user_id"]
+    if target_user_id == user["id"]:
         raise HTTPException(status_code=400, detail="Cannot remove yourself")
 
-    supabase_admin.table("company_members").delete().eq("id", member_id).execute()
-    return {"message": "Member removed"}
+    # Grab the email before we start deleting — we need it to sweep
+    # any invite rows, and to log a clean message. Try profiles first,
+    # fall back to Auth if the profile row is already missing.
+    target_email = ""
+    try:
+        prof_res = (
+            supabase_admin.table("profiles")
+            .select("email")
+            .eq("id", target_user_id)
+            .single()
+            .execute()
+        )
+        if prof_res.data:
+            target_email = (prof_res.data.get("email") or "").strip().lower()
+    except Exception:
+        pass
+
+    if not target_email:
+        try:
+            auth_user = supabase_admin.auth.admin.get_user_by_id(target_user_id)
+            if auth_user and getattr(auth_user, "user", None):
+                target_email = (auth_user.user.email or "").strip().lower()
+        except Exception:
+            pass
+
+    # 1. Drop the company_members row
+    try:
+        supabase_admin.table("company_members").delete().eq("id", member_id).execute()
+    except Exception as e:
+        print(f"[remove_member] Failed to delete company_members row {member_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to remove member")
+
+    # 2. Delete any pending/accepted invite rows for this email within
+    #    this company. Case-insensitive match — older invites may have
+    #    mixed-case emails.
+    if target_email:
+        try:
+            supabase_admin.table("company_invites").delete().ilike(
+                "email", target_email
+            ).eq("company_id", company["id"]).execute()
+        except Exception as e:
+            print(f"[remove_member] Failed to delete invites for {target_email}: {e}")
+
+    # 3. Delete the profiles row
+    try:
+        supabase_admin.table("profiles").delete().eq("id", target_user_id).execute()
+    except Exception as e:
+        print(f"[remove_member] Failed to delete profile {target_user_id}: {e}")
+
+    # 4. Delete the Supabase Auth user — IRREVERSIBLE
+    try:
+        supabase_admin.auth.admin.delete_user(target_user_id)
+    except Exception as e:
+        print(f"[remove_member] Failed to delete auth user {target_user_id}: {e}")
+        # Don't raise — the member is already gone from the company; the
+        # Auth leftover is a follow-up cleanup problem, not a blocker.
+
+    return {"message": "Member removed and account deleted"}
 
 
 @router.delete("/invites/{invite_id}")
@@ -572,6 +657,18 @@ async def auto_join_company(user: dict = Depends(get_current_user)):
     # Already in a company?
     existing = _get_user_company(user["id"])
     if existing:
+        # The user was pre-added to company_members by add_member's
+        # "new user" branch, but the matching company_invites row is
+        # still sitting at status='pending'. Without this sweep the UI
+        # shows the user twice: once as an active member and once as a
+        # pending invite that never resolves. Mark any such invites
+        # accepted now so the pending list stays clean.
+        try:
+            supabase_admin.table("company_invites").update(
+                {"status": "accepted"}
+            ).ilike("email", user_email_normalized).eq("status", "pending").execute()
+        except Exception:
+            pass  # Non-fatal — a stale invite row is cosmetic, not blocking
         return {"status": "already_member", "company": existing}
 
     # Check for pending invites matching this email (case-insensitive — invites
