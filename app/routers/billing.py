@@ -366,12 +366,21 @@ async def _handle_subscription_change(data):
 
     # Email confirmation only on actual change — renewals re-use the same plan
     # slug so old == new and we skip.
+    #
+    # Best-effort: wrapped in try/except so an email-layer failure (Resend
+    # not configured, network blip, bad template) can NEVER break the plan
+    # upgrade. The DB write above is the source of truth; missing an email
+    # is annoying, but a 500 here would make Stripe retry, poison the
+    # idempotency table (on older code), and leave the customer on free.
     if new_plan_slug != old_plan_slug and new_plan_slug != "free":
-        await _send_subscription_email(
-            owner_id=owner_id,
-            new_plan_slug=new_plan_slug,
-            old_plan_slug=old_plan_slug,
-        )
+        try:
+            await _send_subscription_email(
+                owner_id=owner_id,
+                new_plan_slug=new_plan_slug,
+                old_plan_slug=old_plan_slug,
+            )
+        except Exception as e:
+            print(f"[billing] subscription_change email failed for company {company_row['id']}: {e}")
 
 
 async def _handle_subscription_cancelled(data):
@@ -437,13 +446,19 @@ async def _handle_subscription_cancelled(data):
         "past_due_invoice_id": None,
     }).eq("id", company_row["id"]).execute()
 
-    # Send downgrade notice (but not if they were already on free)
+    # Send downgrade notice (but not if they were already on free).
+    # Wrapped in try/except — same reasoning as subscription_change:
+    # the DB downgrade above is the source of truth, an email failure
+    # must not crash the webhook.
     if old_plan_slug != "free":
-        await _send_subscription_email(
-            owner_id=owner_id,
-            new_plan_slug="free",
-            old_plan_slug=old_plan_slug,
-        )
+        try:
+            await _send_subscription_email(
+                owner_id=owner_id,
+                new_plan_slug="free",
+                old_plan_slug=old_plan_slug,
+            )
+        except Exception as e:
+            print(f"[billing] subscription_cancelled email failed for company {company_row['id']}: {e}")
 
 
 async def _handle_payment_failed(data):
