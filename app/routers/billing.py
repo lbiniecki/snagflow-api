@@ -46,7 +46,11 @@ if not _STRIPE_WEBHOOK_SECRET and not _ALLOW_UNSIGNED_WEBHOOKS:
 # old price.
 PRICE_TO_PLAN = {
     # ── Monthly ──────────────────────────────────────────────────
-    "price_1TNyLGIzCuyhGXgYJyUyNFoq": "solo",
+    # Solo monthly: old price (price_1TNyLG...) archived 2026-04-24 when
+    # Stripe Tax + Poland OSS registration was activated. The new price
+    # below has tax_behavior="exclusive" so Stripe Tax adds 23% VAT on
+    # top at checkout (Polish B2C) or reverse-charges (EU B2B with VAT).
+    "price_1TPm8TIzCuyhGXgYlsF96cZJ": "solo",
     "price_1TNySxIzCuyhGXgY6gKc3Yxt": "starter",
     "price_1TNyUtIzCuyhGXgYZyfhzQoQ": "team",
     "price_1TNyWUIzCuyhGXgYyUrkzDZ4": "pro",
