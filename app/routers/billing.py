@@ -2,6 +2,7 @@
 Stripe billing router — checkout sessions, webhooks, customer portal.
 """
 import os
+import json
 from typing import Optional
 import stripe
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -232,9 +233,10 @@ async def stripe_webhook(request: Request):
          Only local dev with VOXSITE_ENV=development can fall through
          to unsigned JSON parsing (for use with `stripe listen`).
       2. Idempotency: every Stripe event has a unique `evt_xxx` id.
-         We INSERT it into stripe_events at the top of the handler;
-         if the insert hits the primary-key constraint we know it's
-         a retry/duplicate and skip the body.
+         We CHECK stripe_events before dispatch, and INSERT only after
+         the handler succeeds. This way a crashed handler (500) does
+         NOT poison the idempotency table — Stripe's retry will get
+         a fresh chance to process the event.
     """
     payload = await request.body()
     sig = request.headers.get("stripe-signature")
@@ -245,41 +247,48 @@ async def stripe_webhook(request: Request):
             # Missing signature in prod = hostile request. Reject.
             raise HTTPException(status_code=400, detail="Missing signature")
         try:
-            event = stripe.Webhook.construct_event(payload, sig, _STRIPE_WEBHOOK_SECRET)
+            # Verify signature against raw bytes. We discard the returned
+            # StripeObject and re-parse the payload as a plain dict so all
+            # downstream code can use normal dict access (.get, [...]).
+            # Newer Stripe SDKs (v7+) changed StripeObject's behaviour so
+            # that `.get()` on it raises KeyError instead of falling back,
+            # which crashed the previous handler on every webhook.
+            stripe.Webhook.construct_event(payload, sig, _STRIPE_WEBHOOK_SECRET)
         except (ValueError, stripe.error.SignatureVerificationError):
             raise HTTPException(status_code=400, detail="Invalid webhook signature")
-    elif _ALLOW_UNSIGNED_WEBHOOKS:
-        # Dev only — parse raw JSON so `stripe listen` works locally.
-        import json
-        event = json.loads(payload)
-    else:
+    elif not _ALLOW_UNSIGNED_WEBHOOKS:
         # Defensive: import-time guard should have prevented this, but
         # if config is tampered with at runtime, refuse.
         raise HTTPException(status_code=500, detail="Webhook secret not configured")
 
-    event_id = event.get("id") if isinstance(event, dict) else event.id
-    event_type = event.get("type") if isinstance(event, dict) else event.type
-    data = event.get("data", {}).get("object", {}) if isinstance(event, dict) else event.data.object
+    # Parse the raw payload as a plain dict — consistent handling whether
+    # or not the secret is configured, and avoids StripeObject method
+    # gotchas (e.g. `.get()` not behaving like dict.get in newer SDKs).
+    event = json.loads(payload)
 
-    # ── 2. Idempotency: record the event, bail on duplicates ──────
+    event_id = event.get("id")
+    event_type = event.get("type")
+    data = event.get("data", {}).get("object", {})
+
+    # ── 2. Idempotency: check first, record only after success ────
     # Stripe retries events whenever they don't get a 2xx within
-    # ~30s, and will occasionally re-send even on success. Without
-    # this guard, customers get multiple "upgrade confirmed" emails
-    # and the plan row gets rewritten on every retry.
+    # ~30s, and will occasionally re-send even on success.
     #
-    # We rely on stripe_events.event_id being a PRIMARY KEY: the
-    # INSERT will raise on duplicates, which we treat as "already
-    # processed" and return 200 so Stripe stops retrying.
+    # Order matters: we CHECK for existing event_id before dispatch,
+    # but only INSERT after dispatch succeeds. If dispatch crashes
+    # (500), nothing is recorded — Stripe retries, and we get another
+    # chance to process the work. Previously we recorded first, and
+    # a crashed handler would permanently lose the event because the
+    # retry would see the row and skip processing.
     if event_id:
-        try:
-            supabase_admin.table("stripe_events").insert({
-                "event_id": event_id,
-                "event_type": event_type or "unknown",
-            }).execute()
-        except Exception:
-            # Treat any insert failure as "already seen" and return
-            # 200. If it was a real DB outage we'll retry on the
-            # next delivery — Stripe is patient.
+        existing = (
+            supabase_admin.table("stripe_events")
+            .select("event_id")
+            .eq("event_id", event_id)
+            .limit(1)
+            .execute()
+        )
+        if existing.data:
             return {"received": True, "duplicate": True}
 
     # ── 3. Dispatch ───────────────────────────────────────────────
@@ -291,6 +300,18 @@ async def stripe_webhook(request: Request):
         await _handle_payment_failed(data)
     elif event_type == "invoice.payment_succeeded":
         await _handle_payment_succeeded(data)
+
+    # ── 4. Record successful processing ───────────────────────────
+    # Best-effort: if insert races with a concurrent delivery we ignore
+    # it (both calls did equivalent idempotent work anyway).
+    if event_id:
+        try:
+            supabase_admin.table("stripe_events").insert({
+                "event_id": event_id,
+                "event_type": event_type or "unknown",
+            }).execute()
+        except Exception:
+            pass
 
     return {"received": True}
 
