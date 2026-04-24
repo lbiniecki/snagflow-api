@@ -195,13 +195,27 @@ async def create_checkout(body: CheckoutRequest, user: dict = Depends(get_curren
             {"stripe_customer_id": stripe_customer_id}
         ).eq("id", company["id"]).execute()
 
-    # Create checkout session
+    # Create checkout session.
+    #
+    # Tax handling:
+    #   - automatic_tax.enabled = True → Stripe Tax calculates VAT based on
+    #     the customer's billing address at checkout. Requires Stripe Tax
+    #     to be activated at the account level + relevant registrations
+    #     (Poland domestic + EU OSS) configured.
+    #   - customer_update.address = "auto" → lets Stripe collect/update the
+    #     customer's billing address during checkout so tax can be computed.
+    #   - tax_id_collection.enabled = True → shows a "VAT number" field for
+    #     B2B customers. Valid EU VAT IDs trigger reverse-charge (no VAT
+    #     added, invoice shows reverse-charge note).
     session = stripe.checkout.Session.create(
         customer=stripe_customer_id,
         mode="subscription",
         line_items=[{"price": body.price_id, "quantity": 1}],
         success_url=f"{FRONTEND_URL}?checkout=success",
         cancel_url=f"{FRONTEND_URL}?checkout=cancel",
+        automatic_tax={"enabled": True},
+        customer_update={"address": "auto", "name": "auto"},
+        tax_id_collection={"enabled": True},
         metadata={
             "company_id": company["id"],
             "user_id": user["id"],
