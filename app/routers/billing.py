@@ -375,11 +375,21 @@ async def _handle_subscription_change(data):
     old_plan_slug = company_row.get("plan") or "free"
     owner_id = company_row.get("owner_id")
 
-    # Apply the update
+    # Apply the update.
+    #
+    # We also reset subscription_status to 'active' and clear any past_due
+    # fields. This handles the case where a customer was previously cancelled
+    # or past_due and is now re-subscribing — without this, stale status
+    # values from a previous lifecycle would carry over and the UI banner
+    # logic could misbehave.
     supabase_admin.table("companies").update({
         "plan": new_plan_slug,
         "max_users": max_users,
         "stripe_subscription_id": subscription_id,
+        "subscription_status": "active",
+        "past_due_since": None,
+        "past_due_invoice_id": None,
+        "past_due_last_notified_at": None,
     }).eq("id", company_row["id"]).execute()
 
     # Email confirmation only on actual change — renewals re-use the same plan
