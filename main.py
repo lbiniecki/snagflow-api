@@ -22,14 +22,19 @@ if isinstance(origins, str):
     except (json.JSONDecodeError, TypeError):
         origins = [o.strip() for o in origins.split(",") if o.strip()]
 
+# Vercel auto-generates a preview subdomain per feature branch:
+#   snagflow-app-git-<branch>-snag-flow.vercel.app
+#   snagflow-<hash>-snag-flow.vercel.app
+# Allow them via regex so feature-branch testing doesn't require
+# re-deploying the API every time a new branch is pushed.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
+    allow_origin_regex=r"https://snagflow(-app)?-(git-[\w-]+|[\w]+)-snag-flow\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 # ─── Routers ──────────────────────────────────────────────────
 app.include_router(auth.router, prefix="/api/auth", tags=["Auth"])
 app.include_router(projects.router, prefix="/api/projects", tags=["Projects"])
