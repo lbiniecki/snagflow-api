@@ -82,6 +82,55 @@ def _get_user_company(user_id: str):
     return res.data[0] if res.data else None
 
 
+def _get_subscription_state(company_id: Optional[str]) -> dict:
+    """
+    Fetch cancel_at_period_end + current_period_end from Stripe for the
+    company's active subscription.
+
+    Returns empty dict on no subscription, no company, or any Stripe error.
+    Called from /plan, which runs on most page loads — must NEVER raise.
+    A Stripe outage should not break the entire app shell; the user just
+    won't see their pending-cancellation banner until Stripe recovers.
+
+    Note: at <100 customers a live Stripe fetch per /plan call is fine.
+    If this becomes a bottleneck, store the values in the companies table
+    and update them in the customer.subscription.updated webhook handler.
+    """
+    if not company_id:
+        return {}
+
+    try:
+        res = (
+            supabase_admin.table("companies")
+            .select("stripe_subscription_id")
+            .eq("id", company_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception as e:
+        print(f"[billing] _get_subscription_state: company lookup failed: {e}")
+        return {}
+
+    if not res.data:
+        return {}
+
+    sub_id = res.data[0].get("stripe_subscription_id")
+    if not sub_id:
+        return {}
+
+    try:
+        sub = stripe.Subscription.retrieve(sub_id)
+        return {
+            "cancel_at_period_end": bool(sub.get("cancel_at_period_end")),
+            # current_period_end is a unix timestamp (seconds since epoch).
+            # Frontend converts to a localised date.
+            "current_period_end": sub.get("current_period_end"),
+        }
+    except Exception as e:
+        print(f"[billing] _get_subscription_state: Stripe retrieve failed for {sub_id}: {e}")
+        return {}
+
+
 # ─── Plan matrix endpoint (used by frontend for pricing & paywalls) ───
 
 @router.get("/plans")
@@ -150,6 +199,21 @@ async def get_my_plan(user: dict = Depends(get_current_user)):
         )
         member_count = members.count or 1
 
+    # Determine whether the current user owns the company they're in.
+    # Drives the pending-cancellation banner UI: owners see a "Reactivate"
+    # button; members see a read-only "contact your owner" message.
+    is_owner = False
+    if company_id:
+        owner_check = (
+            supabase_admin.table("companies")
+            .select("owner_id")
+            .eq("id", company_id)
+            .limit(1)
+            .execute()
+        )
+        if owner_check.data and owner_check.data[0].get("owner_id") == user["id"]:
+            is_owner = True
+
     return {
         "plan": plan,
         "usage": {
@@ -162,6 +226,8 @@ async def get_my_plan(user: dict = Depends(get_current_user)):
             "snags_this_month": not is_unlimited(limits["max_snags_per_month"]) and snag_count >= limits["max_snags_per_month"],
             "users": not is_unlimited(limits["max_users"]) and member_count >= limits["max_users"],
         },
+        "subscription": _get_subscription_state(company_id),
+        "is_owner": is_owner,
     }
 
 
@@ -237,6 +303,70 @@ async def create_portal(user: dict = Depends(get_current_user)):
         return_url=f"{FRONTEND_URL}",
     )
     return {"portal_url": session.url}
+
+
+@router.post("/reactivate")
+async def reactivate_subscription(user: dict = Depends(get_current_user)):
+    """
+    Reactivate a subscription that was scheduled to cancel at period end.
+
+    Owner-only — _get_user_company filters by owner_id, so non-owners
+    silently get 'No active subscription' which is the right outcome
+    (members shouldn't see this button in the UI in the first place).
+
+    The race-condition case (subscription expired between the user
+    seeing the banner and clicking the button) is handled by Stripe
+    returning 404, which we surface as a clean error message.
+    """
+    company = _get_user_company(user["id"])
+    if not company:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the company owner can reactivate the subscription.",
+        )
+
+    sub_id = company.get("stripe_subscription_id")
+    if not sub_id:
+        raise HTTPException(
+            status_code=400,
+            detail="No active subscription to reactivate.",
+        )
+
+    try:
+        sub = stripe.Subscription.retrieve(sub_id)
+    except stripe.error.InvalidRequestError:
+        # Subscription deleted in Stripe — usually means the period
+        # ended between the banner render and this click. Tell the
+        # user clearly so they can re-subscribe via /pricing.
+        raise HTTPException(
+            status_code=404,
+            detail="Your subscription has already ended. Please subscribe again from the pricing page.",
+        )
+    except Exception as e:
+        print(f"[billing] reactivate: Stripe retrieve failed for {sub_id}: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail="Could not contact Stripe. Please try again in a moment.",
+        )
+
+    if not sub.get("cancel_at_period_end"):
+        # Idempotent: clicking reactivate on a non-cancelling sub is a no-op
+        # rather than an error. Frontend can refresh /plan to confirm state.
+        return {"ok": True, "already_active": True}
+
+    try:
+        updated = stripe.Subscription.modify(sub_id, cancel_at_period_end=False)
+    except Exception as e:
+        print(f"[billing] reactivate: Stripe modify failed for {sub_id}: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail="Could not reactivate subscription. Please try again in a moment.",
+        )
+
+    return {
+        "ok": True,
+        "current_period_end": updated.get("current_period_end"),
+    }
 
 
 # ─── Webhook ────────────────────────────────────────────────────
