@@ -777,15 +777,16 @@ async def email_report(
     """
     import traceback
     try:
-        return await _email_report_inner(project_id, body, user)
-    except HTTPException:
-        # Already a structured HTTP error — re-raise without logging
-        # as an unhandled exception.
+        print(f"[email_report] START project_id={project_id} mode={body.mode} to={body.to}")
+        result = await _email_report_inner(project_id, body, user)
+        print(f"[email_report] OK project_id={project_id} result={result}")
+        return result
+    except HTTPException as he:
+        # Log HTTPExceptions too so we can see structured 5xx errors
+        # raised by the inner function (e.g. "send_report_email failed").
+        print(f"[email_report] HTTPException status={he.status_code} detail={he.detail}")
         raise
     except Exception as e:
-        # Log the full traceback to stderr so Railway captures it.
-        # Without this wrapper the 500 was silent — no traceback in
-        # logs, just the FastAPI summary line.
         traceback.print_exc()
         print(f"[email_report] UNHANDLED: project_id={project_id} mode={body.mode} error={type(e).__name__}: {e}")
         raise HTTPException(
@@ -836,8 +837,10 @@ async def _email_report_inner(
     pdf_filename = _report_filename(result.project_name, result.visit_no)
 
     # ── Decide: attach vs upload-and-link ──────────────────────
+    print(f"[email_report] pdf_size={pdf_size} threshold={EMAIL_ATTACHMENT_THRESHOLD_BYTES}")
     if pdf_size <= EMAIL_ATTACHMENT_THRESHOLD_BYTES:
         # Attachment mode
+        print(f"[email_report] mode=attachment, calling send_report_email to={recipients}")
         ok = await send_report_email(
             to=recipients,
             project_name=result.project_name,
@@ -849,6 +852,7 @@ async def _email_report_inner(
             pdf_filename=pdf_filename,
             custom_message=body.message,
         )
+        print(f"[email_report] send_report_email returned ok={ok}")
         mode = "attachment"
     else:
         # Link mode — upload to Storage, create signed URL
