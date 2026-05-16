@@ -136,6 +136,17 @@ class SiteVisitReport(FPDF):
         title_align: str = "center",
         # ── Report issue date (editable by user, set per visit) ───
         report_date: Optional[date] = None,
+        # ── Issue numbering (Q1/Q2/Q3 decisions, 16 May 2026) ────
+        # issue_history: rows from public.report_issues for this visit,
+        #   ordered ascending by issue_no. Empty list if nothing issued.
+        # report_mode: "preview" or "issue". "preview" generates a
+        #   working copy; "issue" was committed to the DB before this
+        #   constructor was reached (current_issue_no will be set).
+        # current_issue_no: the issue_no stamped on THIS PDF when
+        #   mode=="issue"; None for preview.
+        issue_history: Optional[List[Dict[str, Any]]] = None,
+        report_mode: str = "preview",
+        current_issue_no: Optional[int] = None,
     ):
         super().__init__()
         self.project = project
@@ -200,6 +211,37 @@ class SiteVisitReport(FPDF):
         #   - Short form in tables/footer: "16/05/2026"
         self._report_date_long = self._report_date.strftime("%d %B %Y")
         self._report_date_short = self._report_date.strftime("%d/%m/%Y")
+
+        # ── Issue numbering state ───────────────────────────────
+        # Normalise history to a list, sort ascending by issue_no
+        # (Document Control Sheet renders newest-first separately).
+        self._issue_history: List[Dict[str, Any]] = list(issue_history or [])
+        self._issue_history.sort(key=lambda r: r.get("issue_no") or 0)
+        self._report_mode = (report_mode or "preview").lower()
+        self._current_issue_no = current_issue_no
+
+        # Latest issued number from history (None if no issues exist yet)
+        latest_issued = None
+        if self._issue_history:
+            latest_issued = max(
+                (r.get("issue_no") for r in self._issue_history if r.get("issue_no") is not None),
+                default=None,
+            )
+        self._latest_issued_no = latest_issued
+
+        # Cover-page "Issue No." string. Decision matrix (16 May 2026):
+        #   Q1 = B: blank/dash when no issue has been recorded
+        #   Q2 = B: "Working copy" marker when a prior issue exists
+        if self._report_mode == "issue" and self._current_issue_no is not None:
+            # This PDF is the official issue
+            self._cover_issue_label = f"Issue No. {self._current_issue_no}"
+        elif self._latest_issued_no is not None:
+            # Preview after a prior issue exists — make it visually
+            # distinct so it can't be mistaken for the official one
+            self._cover_issue_label = f"Working copy (latest: Issue {self._latest_issued_no})"
+        else:
+            # Preview, nothing ever issued — Q1 = B says blank
+            self._cover_issue_label = ""
 
         self.set_auto_page_break(auto=True, margin=25)
 
@@ -455,10 +497,18 @@ class SiteVisitReport(FPDF):
         self.cell(0, 10, "SITE VISIT REPORT", ln=True, align=cell_align)
         self.ln(2)
 
-        # Visit and issue number
+        # Visit and issue number. The "Issue No." part is dynamic
+        # (see _cover_issue_label computed in __init__):
+        #   - Empty for preview when no issue has ever been recorded
+        #   - "Working copy (latest: Issue N)" for preview after issues exist
+        #   - "Issue No. N" when this PDF is the official issue
         self.set_font("DejaVu" if self._use_unicode else "Helvetica", "B", 14)
         self.set_text_color(*DARK)
-        self.cell(0, 8, f"Site visit No. {self.visit_display}  |  Issue No. {self.visit_display}", ln=True, align=cell_align)
+        if self._cover_issue_label:
+            line = f"Site visit No. {self.visit_display}  |  {self._cover_issue_label}"
+        else:
+            line = f"Site visit No. {self.visit_display}"
+        self.cell(0, 8, line, ln=True, align=cell_align)
         self.ln(2)
 
         # Document reference
@@ -492,23 +542,62 @@ class SiteVisitReport(FPDF):
         self.cell(0, 10, "DOCUMENT CONTROL SHEET", align="C", ln=True)
         self.ln(4)
 
-        # ── Current Issue table ──
-        self._table_header_cell(USABLE_W, "CURRENT ISSUE", align="C")
+        # ── Issue history table (Q3 = B, multi-row newest-first) ──
+        # Renders all rows from public.report_issues for this visit.
+        # When the table is empty (nothing ever issued) we still draw
+        # the header + a single placeholder row so the layout is
+        # consistent and the report's status is unambiguous.
+        self._table_header_cell(USABLE_W, "ISSUE HISTORY", align="C")
         self.ln()
 
-        # Clean 4-column layout: label | value | label | value
-        c1 = USABLE_W * 0.15  # labels
-        c2 = USABLE_W * 0.35  # values
-        self._table_cell(c1, "Issue No:", h=10, bold=True, fill=True)
-        self._table_cell(c2, self.visit_display, h=10)
-        self._table_cell(c1, "Date:", h=10, bold=True, fill=True)
-        self._table_cell(c2, self._report_date_short, h=10)
+        # Column widths: # | Date | Reason | Doc Ref
+        col_issue  = USABLE_W * 0.15
+        col_date   = USABLE_W * 0.25
+        col_reason = USABLE_W * 0.35
+        col_ref    = USABLE_W * 0.25
+
+        # Header row
+        for w, txt in zip(
+            [col_issue, col_date, col_reason, col_ref],
+            ["Issue", "Date", "Reason", "Doc Ref"],
+        ):
+            self._table_cell(w, txt, h=8, bold=True, fill=True)
         self.ln()
-        self._table_cell(c1, "Reason:", h=10, bold=True, fill=True)
-        self._table_cell(c2, "Site Inspection", h=10)
-        self._table_cell(c1, "Doc Ref:", h=10, bold=True, fill=True)
-        self._table_cell(c2 - c1, self.doc_ref, h=10)
-        self.ln()
+
+        if self._issue_history:
+            # Render newest-first (Q3=B)
+            history_desc = sorted(
+                self._issue_history,
+                key=lambda r: r.get("issue_no") or 0,
+                reverse=True,
+            )
+            for row in history_desc:
+                no = row.get("issue_no") or "—"
+                # issue_date arrives as ISO string from Supabase; format
+                # to match the rest of the report (DD/MM/YYYY).
+                raw_date = row.get("issue_date") or ""
+                try:
+                    formatted = datetime.strptime(raw_date, "%Y-%m-%d").strftime("%d/%m/%Y")
+                except (ValueError, TypeError):
+                    formatted = raw_date or "—"
+                # Reason is hardcoded for v1; future versions may
+                # surface a user-supplied note from the report_issues
+                # row (currently always blank in v1 since the frontend
+                # doesn't expose the field).
+                reason = (row.get("notes") or "").strip() or "Site Inspection"
+                self._table_cell(col_issue, str(no), h=8)
+                self._table_cell(col_date, formatted, h=8)
+                self._table_cell(col_reason, reason, h=8)
+                self._table_cell(col_ref, self.doc_ref, h=8)
+                self.ln()
+        else:
+            # No issues ever recorded for this visit.
+            # Working copy state — be explicit about it.
+            self._table_cell(col_issue, "—", h=8)
+            self._table_cell(col_date, "—", h=8)
+            self._table_cell(col_reason, "Working copy (not yet issued)", h=8)
+            self._table_cell(col_ref, self.doc_ref, h=8)
+            self.ln()
 
         # ── Sign-off table ──
         self.ln(3)
@@ -1263,6 +1352,10 @@ def generate_report_pdf(
     title_align: str = "center",
     # ── Report issue date (engineer-controlled, persisted per visit) ──
     report_date: Optional[date] = None,
+    # ── Issue numbering (16 May 2026, Q1/Q2/Q3 = B/B/B) ────────────
+    issue_history: Optional[List[Dict[str, Any]]] = None,
+    report_mode: str = "preview",
+    current_issue_no: Optional[int] = None,
 ) -> bytes:
     """
     Generate a professional site visit report PDF.
@@ -1323,6 +1416,9 @@ def generate_report_pdf(
         photos_per_page=photos_per_page,
         title_align=title_align,
         report_date=report_date,
+        issue_history=issue_history,
+        report_mode=report_mode,
+        current_issue_no=current_issue_no,
     )
     report.inspector_email = user_email
     return report.build(photo_data=photo_data)

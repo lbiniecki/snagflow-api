@@ -268,6 +268,7 @@ async def _build_project_report_pdf(
     weather: str = "",
     visit_no: str = "",
     report_date: str = "",
+    mode: str = "preview",
 ) -> ReportBuildResult:
     """
     Shared logic for both the download and email endpoints.
@@ -283,6 +284,18 @@ async def _build_project_report_pdf(
       2. The visit's stored report_date (already in visit_data after fetch).
       3. The visit's visit_date (always present).
       4. Today's date (final fallback; only hits when no visit_id given).
+
+    Mode handling:
+      - "preview" (default): generates a working copy. If prior issues
+        exist for this visit, the PDF cover shows a "Working copy"
+        marker (Q2 decision, 16 May 2026) so it's not mistaken for the
+        official issued document.
+      - "issue": inserts a new row into report_issues with the next
+        sequential issue_no for this visit, then generates the PDF
+        stamped as that issue. The unique constraint on
+        (visit_id, issue_no) is our safety net against concurrent
+        issue clicks producing the same number — on conflict we retry
+        with N+1 a few times.
     """
     # Project (also enforces ownership)
     proj = (
@@ -377,6 +390,111 @@ async def _build_project_report_pdf(
     # If we still don't have one, generate_report_pdf will default to
     # today via its own fallback. Should only happen if no visit_id.
 
+    # ── Issue numbering / history ─────────────────────────────
+    # Always fetch existing issues for this visit (used by the PDF
+    # generator to render the Document Control Sheet's multi-row
+    # history table regardless of mode).
+    #
+    # If mode == "issue", first insert a new row for this issuance,
+    # then re-fetch so the response includes it. The unique constraint
+    # on (visit_id, issue_no) is our race-condition safety net: if two
+    # users click "Issue" simultaneously, the second insert fails and
+    # we retry with N+1 (up to 5 attempts to bound the worst case).
+    issue_history: list[dict] = []
+    current_issue_no: Optional[int] = None  # set when mode=="issue", else None
+
+    if visit_id:
+        # Always fetch existing issues — needed for the Document
+        # Control Sheet history rendering even in preview mode.
+        try:
+            issues_res = (
+                supabase_admin.table("report_issues")
+                .select("*")
+                .eq("visit_id", visit_id)
+                .order("issue_no", desc=False)  # ascending for stable ordering
+                .execute()
+            )
+            issue_history = issues_res.data or []
+        except Exception as e:
+            print(f"[reports] Failed to fetch issue history for visit {visit_id}: {e}")
+            issue_history = []
+
+        if mode == "issue":
+            # Compute next issue_no from what we just fetched, then
+            # insert. Retry on unique-constraint violation in case of
+            # concurrent issuance.
+            if not resolved_report_date:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cannot issue a report without a date. Provide report_date.",
+                )
+
+            max_attempts = 5
+            for attempt in range(max_attempts):
+                # Recompute each iteration in case our fetch is stale
+                # after a concurrent insert.
+                if attempt == 0:
+                    next_no = max((i.get("issue_no", 0) for i in issue_history), default=0) + 1
+                else:
+                    # Re-fetch the latest max from DB after a conflict
+                    try:
+                        latest = (
+                            supabase_admin.table("report_issues")
+                            .select("issue_no")
+                            .eq("visit_id", visit_id)
+                            .order("issue_no", desc=True)
+                            .limit(1)
+                            .execute()
+                        )
+                        latest_no = latest.data[0]["issue_no"] if latest.data else 0
+                    except Exception:
+                        latest_no = next_no  # fall through with previous
+                    next_no = latest_no + 1
+
+                try:
+                    insert_res = (
+                        supabase_admin.table("report_issues")
+                        .insert({
+                            "visit_id": visit_id,
+                            "issue_no": next_no,
+                            "issue_date": resolved_report_date.isoformat(),
+                            "issued_by": user["id"],
+                            # notes is intentionally left blank in v1;
+                            # field exists in schema for future use.
+                        })
+                        .execute()
+                    )
+                    if insert_res.data:
+                        current_issue_no = next_no
+                        # Append to in-memory history so the PDF generator
+                        # sees the new row without a second fetch.
+                        issue_history.append(insert_res.data[0])
+                        break  # success, exit retry loop
+                except Exception as e:
+                    # Unique constraint failure → another request beat us
+                    # to this issue_no. Loop and try the next number.
+                    err_str = str(e).lower()
+                    if "unique" in err_str or "duplicate" in err_str or "23505" in err_str:
+                        if attempt == max_attempts - 1:
+                            raise HTTPException(
+                                status_code=409,
+                                detail="Could not record this issue due to concurrent activity. Please try again.",
+                            )
+                        continue  # retry with next issue_no
+                    # Other errors are real failures
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Failed to record issue: {e}",
+                    )
+
+            if current_issue_no is None:
+                # Shouldn't happen — loop above either succeeds or raises.
+                # But belt-and-braces in case of a logic bug.
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to record issue after multiple attempts.",
+                )
+
     # Snags
     query = (
         supabase_admin.table("snags")
@@ -467,6 +585,13 @@ async def _build_project_report_pdf(
         title_align=settings["title_align"],
         # Report issue date — engineer-controlled, persisted per visit
         report_date=resolved_report_date,
+        # Issue numbering: history list (newest is last after append),
+        # mode flag, and the issue number stamped on this PDF when
+        # mode=="issue". The generator uses mode + len(issue_history)
+        # to decide cover wording (Q1/Q2 decisions, 16 May 2026).
+        issue_history=issue_history,
+        report_mode=mode,
+        current_issue_no=current_issue_no,
     )
 
     # Summary (used by email body; GET endpoint doesn't strictly need it but
@@ -564,6 +689,7 @@ async def get_report(
     weather: str = Query("", description="Weather conditions"),
     visit_no: str = Query("", description="Visit number"),
     report_date: str = Query("", description="Report issue date (YYYY-MM-DD). If set, persisted to the visit."),
+    mode: str = Query("preview", description="'preview' (default, no state change) or 'issue' (creates Issue N row)"),
     user: dict = Depends(get_current_user),
 ):
     """Generate and return a PDF inspection report as a download."""
@@ -576,6 +702,7 @@ async def get_report(
         weather=weather,
         visit_no=visit_no,
         report_date=report_date,
+        mode=mode,
     )
 
     filename = _report_filename(result.project_name, result.visit_no)
@@ -627,6 +754,12 @@ class EmailReportRequest(BaseModel):
     # and printed on the report cover. If omitted, the visit's stored
     # report_date is used (which itself falls back to visit_date).
     report_date: Optional[str] = ""
+    # "preview" (default) generates a working copy without recording an
+    # issue. "issue" creates a new row in report_issues (issue_no =
+    # max(existing)+1) and stamps the PDF as the official Issue N.
+    # Soft-lock model: issuing does NOT prevent further edits to the
+    # visit. The frontend warns the user; the backend trusts the choice.
+    mode: Optional[str] = "preview"
 
 
 @router.post("/{project_id}/email")
@@ -672,6 +805,7 @@ async def email_report(
         weather=body.weather or "",
         visit_no=body.visit_no or "",
         report_date=body.report_date or "",
+        mode=body.mode or "preview",
     )
 
     pdf_size = len(result.pdf_bytes)
