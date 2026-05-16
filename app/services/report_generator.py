@@ -6,7 +6,7 @@ Structure: Cover → Document Control → Snag Items (with photos) → Closing
 import io
 import os
 import tempfile
-from datetime import datetime
+from datetime import datetime, date
 from typing import List, Dict, Any, Optional
 from fpdf import FPDF
 
@@ -134,6 +134,8 @@ class SiteVisitReport(FPDF):
         # ── Phase 2: layout mode + cover alignment ───────────────
         photos_per_page: int = 2,
         title_align: str = "center",
+        # ── Report issue date (editable by user, set per visit) ───
+        report_date: Optional[date] = None,
     ):
         super().__init__()
         self.project = project
@@ -178,6 +180,26 @@ class SiteVisitReport(FPDF):
         # Document reference: custom or auto-generated
         p_name = project.get("name", "")[:3].upper()
         self.doc_ref = f"{p_name}-SV{self.visit_no.zfill(2)}"
+
+        # ── Report issue date ───────────────────────────────────
+        # Engineer-controlled "date printed on the report cover", separate
+        # from visit_date (when the site walk happened) and from generation
+        # timestamp (which is intentionally no longer shown anywhere).
+        #
+        # Falls back to today only if no report_date was supplied — this
+        # shouldn't happen in production because the backend always passes
+        # a value (either the user's picked date or the visit's stored
+        # report_date, which was backfilled from visit_date). The fallback
+        # exists for older callers / unit tests.
+        if isinstance(report_date, date):
+            self._report_date = report_date
+        else:
+            self._report_date = datetime.now().date()
+        # Two formats used in different places on the PDF:
+        #   - Long form on the cover: "16 May 2026"
+        #   - Short form in tables/footer: "16/05/2026"
+        self._report_date_long = self._report_date.strftime("%d %B %Y")
+        self._report_date_short = self._report_date.strftime("%d/%m/%Y")
 
         self.set_auto_page_break(auto=True, margin=25)
 
@@ -452,7 +474,7 @@ class SiteVisitReport(FPDF):
         address = self.project.get("address", "")
         if address:
             self.cell(0, 6, f"Site: {address}", ln=True, align=cell_align)
-        self.cell(0, 6, f"Date: {datetime.now().strftime('%d %B %Y')}", ln=True, align=cell_align)
+        self.cell(0, 6, f"Date: {self._report_date_long}", ln=True, align=cell_align)
 
         # Decorative accent bar at bottom (replaces HP dots + green sidebar)
         self.set_fill_color(*self._brand_rgb)
@@ -480,7 +502,7 @@ class SiteVisitReport(FPDF):
         self._table_cell(c1, "Issue No:", h=10, bold=True, fill=True)
         self._table_cell(c2, self.visit_display, h=10)
         self._table_cell(c1, "Date:", h=10, bold=True, fill=True)
-        self._table_cell(c2, datetime.now().strftime("%d/%m/%Y"), h=10)
+        self._table_cell(c2, self._report_date_short, h=10)
         self.ln()
         self._table_cell(c1, "Reason:", h=10, bold=True, fill=True)
         self._table_cell(c2, "Site Inspection", h=10)
@@ -509,7 +531,7 @@ class SiteVisitReport(FPDF):
 
         # Date row
         self._table_cell(sign_cols[0], "Date", bold=True, fill=True)
-        self._table_cell(sign_cols[1], datetime.now().strftime("%d/%m/%Y"))
+        self._table_cell(sign_cols[1], self._report_date_short)
         for w in sign_cols[2:]:
             self._table_cell(w, "")
         self.ln()
@@ -1176,7 +1198,7 @@ class SiteVisitReport(FPDF):
         self.ln(4)
         # Date and email below
         self._set_muted(8)
-        self.cell(70, 5, f"Date: {datetime.now().strftime('%d/%m/%Y')}", ln=True)
+        self.cell(70, 5, f"Date: {self._report_date_short}", ln=True)
         if self.inspector_email:
             self.cell(70, 5, self.inspector_email, ln=True)
 
@@ -1239,6 +1261,8 @@ def generate_report_pdf(
     # ── Phase 2: layout mode + cover alignment ───────────────────
     photos_per_page: int = 2,
     title_align: str = "center",
+    # ── Report issue date (engineer-controlled, persisted per visit) ──
+    report_date: Optional[date] = None,
 ) -> bytes:
     """
     Generate a professional site visit report PDF.
@@ -1298,6 +1322,7 @@ def generate_report_pdf(
         include_rectification=include_rectification,
         photos_per_page=photos_per_page,
         title_align=title_align,
+        report_date=report_date,
     )
     report.inspector_email = user_email
     return report.build(photo_data=photo_data)

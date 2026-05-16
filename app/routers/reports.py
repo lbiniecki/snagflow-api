@@ -14,7 +14,7 @@ import uuid
 import httpx
 from io import BytesIO
 from typing import Optional
-from datetime import datetime, timezone
+from datetime import datetime, date, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -267,6 +267,7 @@ async def _build_project_report_pdf(
     include_photos: bool = True,
     weather: str = "",
     visit_no: str = "",
+    report_date: str = "",
 ) -> ReportBuildResult:
     """
     Shared logic for both the download and email endpoints.
@@ -274,6 +275,14 @@ async def _build_project_report_pdf(
     Fetches project (with owner check), visit, snags, photos, company info,
     and plan, then generates the PDF. Raises HTTPException for any data
     problem — callers can let it propagate or catch it.
+
+    Report-date resolution (in priority order):
+      1. `report_date` parameter, if provided (YYYY-MM-DD string from
+         the frontend's date picker). When set, also persisted to
+         site_visits.report_date so subsequent regenerations remember it.
+      2. The visit's stored report_date (already in visit_data after fetch).
+      3. The visit's visit_date (always present).
+      4. Today's date (final fallback; only hits when no visit_id given).
     """
     # Project (also enforces ownership)
     proj = (
@@ -316,6 +325,57 @@ async def _build_project_report_pdf(
             visit_display = raw_ref
     if not visit_display:
         visit_display = visit_no  # falls back to the integer
+
+    # ── Resolve the report issue date ─────────────────────────
+    # See docstring for the priority order. The resolved value is a
+    # `date` object passed into the PDF generator.
+    resolved_report_date: Optional[date] = None
+    if report_date:
+        # User explicitly picked a date in the modal. Parse and persist.
+        try:
+            resolved_report_date = datetime.strptime(report_date, "%Y-%m-%d").date()
+        except ValueError:
+            # Bad date string from the client — fail loudly so the
+            # frontend bug surfaces, rather than silently regenerating
+            # with the wrong date.
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid report_date format: '{report_date}'. Expected YYYY-MM-DD.",
+            )
+        if visit_id and visit_data:
+            # Persist to the visit so the next regeneration pre-fills
+            # this value rather than reverting to visit_date.
+            try:
+                supabase_admin.table("site_visits").update(
+                    {"report_date": resolved_report_date.isoformat()}
+                ).eq("id", visit_id).execute()
+                # Reflect in our local copy too so anything downstream
+                # in this request reads the new value
+                visit_data["report_date"] = resolved_report_date.isoformat()
+            except Exception as e:
+                # Persistence failure shouldn't block report generation.
+                # Log and continue with the in-memory resolved date.
+                print(f"[reports] Failed to persist report_date for visit {visit_id}: {e}")
+    elif visit_data and visit_data.get("report_date"):
+        # No new pick — use the visit's stored value (backfilled on
+        # migration to equal visit_date for old rows; updated on prior
+        # generations for new rows).
+        try:
+            resolved_report_date = datetime.strptime(
+                visit_data["report_date"], "%Y-%m-%d"
+            ).date()
+        except (ValueError, TypeError):
+            resolved_report_date = None
+    elif visit_data and visit_data.get("visit_date"):
+        # Final fallback inside the visit: use visit_date
+        try:
+            resolved_report_date = datetime.strptime(
+                visit_data["visit_date"], "%Y-%m-%d"
+            ).date()
+        except (ValueError, TypeError):
+            resolved_report_date = None
+    # If we still don't have one, generate_report_pdf will default to
+    # today via its own fallback. Should only happen if no visit_id.
 
     # Snags
     query = (
@@ -405,6 +465,8 @@ async def _build_project_report_pdf(
         # Phase 2 — layout mode + cover alignment
         photos_per_page=settings["photos_per_page"],
         title_align=settings["title_align"],
+        # Report issue date — engineer-controlled, persisted per visit
+        report_date=resolved_report_date,
     )
 
     # Summary (used by email body; GET endpoint doesn't strictly need it but
@@ -501,6 +563,7 @@ async def get_report(
     include_photos: bool = True,
     weather: str = Query("", description="Weather conditions"),
     visit_no: str = Query("", description="Visit number"),
+    report_date: str = Query("", description="Report issue date (YYYY-MM-DD). If set, persisted to the visit."),
     user: dict = Depends(get_current_user),
 ):
     """Generate and return a PDF inspection report as a download."""
@@ -512,6 +575,7 @@ async def get_report(
         include_photos=include_photos,
         weather=weather,
         visit_no=visit_no,
+        report_date=report_date,
     )
 
     filename = _report_filename(result.project_name, result.visit_no)
@@ -559,6 +623,10 @@ class EmailReportRequest(BaseModel):
     visit_no: Optional[str] = ""
     include_closed: Optional[bool] = True
     message: Optional[str] = None  # custom note from sender
+    # Report issue date (YYYY-MM-DD). If provided, persisted to the visit
+    # and printed on the report cover. If omitted, the visit's stored
+    # report_date is used (which itself falls back to visit_date).
+    report_date: Optional[str] = ""
 
 
 @router.post("/{project_id}/email")
@@ -603,6 +671,7 @@ async def email_report(
         include_photos=True,
         weather=body.weather or "",
         visit_no=body.visit_no or "",
+        report_date=body.report_date or "",
     )
 
     pdf_size = len(result.pdf_bytes)
