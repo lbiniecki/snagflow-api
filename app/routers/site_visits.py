@@ -100,11 +100,44 @@ async def list_visits(
             # without counts. Frontend treats missing counts as "no pills".
             pass
 
+    # ── Issue counts per visit ──────────────────────────────────────
+    # Same single-query pattern as snags. We fetch only this project's
+    # visits' issues by filtering on the IDs we already have.
+    # Returns issue_count (total issues recorded) and latest_issue_no
+    # (max so the UI can show "Issue N" without recomputing).
+    issues_by_visit: dict[str, dict[str, int]] = {}
+    if visit_rows:
+        try:
+            visit_ids = [v["id"] for v in visit_rows]
+            issues = (
+                supabase_admin.table("report_issues")
+                .select("visit_id, issue_no")
+                .in_("visit_id", visit_ids)
+                .execute()
+            )
+            for row in (issues.data or []):
+                vid = row.get("visit_id")
+                no = row.get("issue_no") or 0
+                if not vid:
+                    continue
+                bucket = issues_by_visit.setdefault(
+                    vid, {"issue_count": 0, "latest_issue_no": 0}
+                )
+                bucket["issue_count"] += 1
+                if no > bucket["latest_issue_no"]:
+                    bucket["latest_issue_no"] = no
+        except Exception as e:
+            # Non-fatal — if the issues table doesn't exist yet or the
+            # query fails, visits return without issue info. Frontend
+            # treats missing fields as "not issued".
+            print(f"[site_visits] Issue count aggregation failed: {e}")
+
     # Merge counts onto visit rows. Missing visit_ids default to zero.
     enriched = []
     for v in visit_rows:
         counts = counts_by_visit.get(v["id"], {"snag_count": 0, "open_count": 0, "closed_count": 0})
-        enriched.append({**v, **counts})
+        issues = issues_by_visit.get(v["id"], {"issue_count": 0, "latest_issue_no": 0})
+        enriched.append({**v, **counts, **issues})
 
     return enriched
 
