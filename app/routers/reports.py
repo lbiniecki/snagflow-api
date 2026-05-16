@@ -775,6 +775,30 @@ async def email_report(
     - PDFs <10 MB are attached directly; larger reports are uploaded to
       Supabase Storage and sent as a time-limited signed-URL link.
     """
+    import traceback
+    try:
+        return await _email_report_inner(project_id, body, user)
+    except HTTPException:
+        # Already a structured HTTP error — re-raise without logging
+        # as an unhandled exception.
+        raise
+    except Exception as e:
+        # Log the full traceback to stderr so Railway captures it.
+        # Without this wrapper the 500 was silent — no traceback in
+        # logs, just the FastAPI summary line.
+        traceback.print_exc()
+        print(f"[email_report] UNHANDLED: project_id={project_id} mode={body.mode} error={type(e).__name__}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Email send failed: {type(e).__name__}: {e}",
+        )
+
+
+async def _email_report_inner(
+    project_id: str,
+    body: EmailReportRequest,
+    user: dict,
+):
     # ── Plan gate ──────────────────────────────────────────────
     plan_slug, _company_id = await get_company_plan(user["id"])
     require_feature(
