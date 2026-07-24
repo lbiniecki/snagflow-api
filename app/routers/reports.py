@@ -536,7 +536,9 @@ async def _build_project_report_pdf(
                         if url:
                             img_bytes = await _download_photo(url)
                             if img_bytes:
-                                photos_for_snag.append((img_bytes, s.get(_taken_key_for[path_key])))
+                                photos_for_snag.append(
+                                    (img_bytes, s.get(_taken_key_for[path_key]), s.get("created_at"))
+                                )
                     except Exception:
                         pass
 
@@ -548,7 +550,12 @@ async def _build_project_report_pdf(
                     if url:
                         img_bytes = await _download_photo(url)
                         if img_bytes:
-                            photos_for_snag.append((img_bytes, s.get("rectification_photo_taken_at")))
+                            # Rectification photo arrives at closure — updated_at
+                            # is the closest honest record of its upload time.
+                            photos_for_snag.append(
+                                (img_bytes, s.get("rectification_photo_taken_at"),
+                                 s.get("updated_at") or s.get("created_at"))
+                            )
                 except Exception:
                     pass
 

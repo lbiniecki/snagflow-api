@@ -865,30 +865,44 @@ class SiteVisitReport(FPDF):
         if raw is None:
             return []
         if isinstance(raw, (bytes, bytearray)):
-            return [(bytes(raw), None)]
+            return [(bytes(raw), None, None)]
         if isinstance(raw, list):
             out = []
             for entry in raw[:4]:
                 if isinstance(entry, (bytes, bytearray)):
-                    out.append((bytes(entry), None))
+                    out.append((bytes(entry), None, None))
                 elif isinstance(entry, tuple) and len(entry) == 2:
-                    out.append((bytes(entry[0]), entry[1]))
+                    out.append((bytes(entry[0]), entry[1], None))
+                elif isinstance(entry, tuple) and len(entry) == 3:
+                    out.append((bytes(entry[0]), entry[1], entry[2]))
             return out
         return []
 
     @staticmethod
-    def _taken_label(taken) -> str:
-        """Caption fragment for a photo's EXIF capture date.
+    def _taken_label(taken, uploaded=None) -> str:
+        """Caption fragment for a photo's date.
 
-        Honest by design: a missing/unparseable date reads "date unavailable"
-        rather than silently borrowing the upload date."""
-        if not taken:
-            return "date unavailable"
-        try:
-            dt = datetime.fromisoformat(str(taken).replace("Z", "").split("+")[0])
-            return f"taken {dt.strftime('%d/%m/%Y')}"
-        except (ValueError, TypeError):
-            return "date unavailable"
+        Three honest tiers, each wording a claim the data actually supports:
+          "taken DD/MM/YYYY"    — genuine EXIF capture date (locked field)
+          "uploaded DD/MM/YYYY" — database record of when the photo entered
+                                  VoxSite; for photos captured live through
+                                  the app this equals the capture day
+          "date unavailable"    — neither exists
+        Never presents an upload date as a capture date."""
+        def _fmt(v):
+            try:
+                return datetime.fromisoformat(str(v).replace("Z", "").split("+")[0]).strftime("%d/%m/%Y")
+            except (ValueError, TypeError):
+                return None
+        if taken:
+            d = _fmt(taken)
+            if d:
+                return f"taken {d}"
+        if uploaded:
+            d = _fmt(uploaded)
+            if d:
+                return f"uploaded {d}"
+        return "date unavailable"
 
     def _count_landscape(self, photos_list: List[bytes]) -> int:
         """Return count of photos whose width > height. Unknowns treated as portrait."""
@@ -1137,11 +1151,11 @@ class SiteVisitReport(FPDF):
                 (MARGIN, grid_top),
                 (MARGIN + cell_w + cell_gap, grid_top),
             ]
-            for pi, (p_bytes, p_taken) in enumerate(photos_page1):
+            for pi, (p_bytes, p_taken, p_up) in enumerate(photos_page1):
                 gx, gy = positions[pi]
                 self._render_photo_fit(
                     gx, gy, cell_w, photo_max_h,
-                    p_bytes, f"Photo {item_no}.{pi + 1} \u2014 {self._taken_label(p_taken)}",
+                    p_bytes, f"Photo {item_no}.{pi + 1} \u2014 {self._taken_label(p_taken, p_up)}",
                 )
         else:
             self.set_xy(MARGIN, grid_top)
@@ -1168,11 +1182,11 @@ class SiteVisitReport(FPDF):
                 (MARGIN, cont_top),
                 (MARGIN + cell_w + cell_gap, cont_top),
             ]
-            for pi, (p_bytes, p_taken) in enumerate(photos_page2):
+            for pi, (p_bytes, p_taken, p_up) in enumerate(photos_page2):
                 gx, gy = positions[pi]
                 self._render_photo_fit(
                     gx, gy, cell_w, cont_photo_max_h,
-                    p_bytes, f"Photo {item_no}.{pi + 3} \u2014 {self._taken_label(p_taken)}",
+                    p_bytes, f"Photo {item_no}.{pi + 3} \u2014 {self._taken_label(p_taken, p_up)}",
                 )
 
 
@@ -1231,7 +1245,7 @@ class SiteVisitReport(FPDF):
         if photos_list:
             self._render_photo_fit(
                 MARGIN, photo_top, USABLE_W, photo_max_h,
-                photos_list[0][0], f"Photo {item_no}.1 \u2014 {self._taken_label(photos_list[0][1])}",
+                photos_list[0][0], f"Photo {item_no}.1 \u2014 {self._taken_label(photos_list[0][1], photos_list[0][2])}",
             )
         else:
             self.set_xy(MARGIN, photo_top)
@@ -1244,7 +1258,7 @@ class SiteVisitReport(FPDF):
             self._render_rectification_block(MARGIN, page_bottom - rect_needed + 2, USABLE_W)
 
         # Continuation pages for photos 2-4
-        for pi, (p_bytes, p_taken) in enumerate(photos_list[1:], start=2):
+        for pi, (p_bytes, p_taken, p_up) in enumerate(photos_list[1:], start=2):
             self.add_page(orientation="P")
             self._set_body(9)
             self.cell(0, 6, f"Item {item_no:02d} - continued", ln=True)
@@ -1253,7 +1267,7 @@ class SiteVisitReport(FPDF):
             cont_max_h = (PAGE_H - 25) - cont_top - 4
             self._render_photo_fit(
                 MARGIN, cont_top, USABLE_W, cont_max_h,
-                p_bytes, f"Photo {item_no}.{pi} \u2014 {self._taken_label(p_taken)}",
+                p_bytes, f"Photo {item_no}.{pi} \u2014 {self._taken_label(p_taken, p_up)}",
             )
 
     # ───────────────────────────────────────────────────────────
@@ -1319,11 +1333,11 @@ class SiteVisitReport(FPDF):
                 (MARGIN, grid_top + cell_h + cell_gap),
                 (MARGIN + cell_w + cell_gap, grid_top + cell_h + cell_gap),
             ]
-            for pi, (p_bytes, p_taken) in enumerate(photos_list[:4]):
+            for pi, (p_bytes, p_taken, p_up) in enumerate(photos_list[:4]):
                 gx, gy = grid_positions[pi]
                 self._render_photo_fit(
                     gx, gy, cell_w, photo_max_h,
-                    p_bytes, f"Photo {item_no}.{pi + 1} \u2014 {self._taken_label(p_taken)}",
+                    p_bytes, f"Photo {item_no}.{pi + 1} \u2014 {self._taken_label(p_taken, p_up)}",
                 )
         else:
             self.set_xy(MARGIN, grid_top)
