@@ -281,17 +281,31 @@ class SiteVisitReport(FPDF):
                 self._logo_bytes = None
 
     # ─── Text sanitisation wrappers ─────────────────────────────
+    # These wrappers must accept the string under BOTH names: our own code
+    # passes it positionally (lands in `txt`), while fpdf2 ≥2.7.6 internally
+    # RECURSES into self.multi_cell(text=...) for page-break and output-mode
+    # handling — re-entering these overrides with the modern kwarg. Forward
+    # only `text=` (never the deprecated `txt=`), or fpdf's deprecation shim
+    # raises "Both txt= & text= arguments cannot be provided".
     def cell(self, w=0, h=0, txt="", **kwargs):
-        t = str(txt) if txt else ""
+        t = kwargs.pop("text", None)
+        if t is None:
+            t = str(txt) if txt else ""
+        else:
+            t = str(t)
         if not self._use_unicode:
             t = _safe(t)
-        return super().cell(w=w, h=h, txt=t, **kwargs)
+        return super().cell(w=w, h=h, text=t, **kwargs)
 
     def multi_cell(self, w, h=0, txt="", **kwargs):
-        t = str(txt) if txt else ""
+        t = kwargs.pop("text", None)
+        if t is None:
+            t = str(txt) if txt else ""
+        else:
+            t = str(t)
         if not self._use_unicode:
             t = _safe(t)
-        return super().multi_cell(w=w, h=h, txt=t, **kwargs)
+        return super().multi_cell(w=w, h=h, text=t, **kwargs)
 
     # ─── Header (inner pages only — cover has its own) ──────────
     def header(self):
