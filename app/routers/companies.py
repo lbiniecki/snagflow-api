@@ -60,6 +60,21 @@ class InviteMember(BaseModel):
     role: str = "member"
 
 
+def _adopt_orphan_projects(user_id: str, company_id: str) -> None:
+    """Attach the user's company-less projects to their (new) company.
+
+    Projects created while the user was briefly solo — before an invite was
+    accepted or a company was created — sit with company_id NULL forever and
+    render with the free-plan watermark (the DUB16 bug). Best-effort: never
+    raises."""
+    try:
+        supabase_admin.table("projects").update(
+            {"company_id": company_id}
+        ).eq("user_id", user_id).is_("company_id", "null").execute()
+    except Exception:
+        pass
+
+
 def _get_user_company(user_id: str):
     """Get the company the user belongs to (as owner or member)."""
     # Check if owner
@@ -126,6 +141,60 @@ async def create_company(
             detail="You already belong to a company. Leave your current company first."
         )
 
+    # A pending invite means a team is already waiting for this person.
+    # Letting them create their own company here silently forks the team
+    # (the "shadow company" bug: duplicate company, watermarked reports,
+    # colleagues invisible to each other). Block with a pointer instead.
+    user_email = (user.get("email") or "").strip().lower()
+    if user_email:
+        try:
+            inv = (
+                supabase_admin.table("company_invites")
+                .select("company_id, expires_at")
+                .ilike("email", user_email)
+                .eq("status", "pending")
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if inv.data:
+                pending = inv.data[0]
+                not_expired = True
+                exp_raw = pending.get("expires_at") or ""
+                if exp_raw:
+                    try:
+                        exp = datetime.fromisoformat(exp_raw.replace("Z", "+00:00"))
+                        not_expired = datetime.now(timezone.utc) <= exp
+                    except Exception:
+                        pass
+                if not_expired:
+                    inviting = "a team"
+                    try:
+                        c_res = (
+                            supabase_admin.table("companies")
+                            .select("name")
+                            .eq("id", pending["company_id"])
+                            .single()
+                            .execute()
+                        )
+                        if c_res.data and c_res.data.get("name"):
+                            inviting = c_res.data["name"]
+                    except Exception:
+                        pass
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"You've been invited to join {inviting}. Close and "
+                            "reopen the app to accept the invite automatically. "
+                            "If you'd rather have your own company, ask the "
+                            "inviter to revoke the invite first."
+                        ),
+                    )
+        except HTTPException:
+            raise
+        except Exception:
+            pass  # Invite lookup failure must never block legitimate creation
+
     result = (
         supabase_admin.table("companies")
         .insert({
@@ -144,6 +213,8 @@ async def create_company(
         "user_id": user["id"],
         "role": "owner",
     }).execute()
+
+    _adopt_orphan_projects(user["id"], company["id"])
 
     return company
 
@@ -659,16 +730,28 @@ async def auto_join_company(user: dict = Depends(get_current_user)):
     if existing:
         # The user was pre-added to company_members by add_member's
         # "new user" branch, but the matching company_invites row is
-        # still sitting at status='pending'. Without this sweep the UI
-        # shows the user twice: once as an active member and once as a
-        # pending invite that never resolves. Mark any such invites
-        # accepted now so the pending list stays clean.
+        # still sitting at status='pending'. Mark it accepted so the UI
+        # stops showing them twice.
+        #
+        # SCOPED to the company they actually belong to: previously this
+        # swept ALL pending invites for the email, which silently killed
+        # invites to OTHER companies the user never joined — membership
+        # was never created, yet the invite read "accepted". That was the
+        # invite that could only be fixed with manual SQL.
         try:
             supabase_admin.table("company_invites").update(
                 {"status": "accepted"}
-            ).ilike("email", user_email_normalized).eq("status", "pending").execute()
+            ).ilike("email", user_email_normalized).eq("status", "pending").eq(
+                "company_id", existing["id"]
+            ).execute()
         except Exception:
             pass  # Non-fatal — a stale invite row is cosmetic, not blocking
+
+        # Self-heal: adopt any of this user's projects still stranded with
+        # company_id NULL (created while they were briefly solo). Runs on
+        # every app open, so strays fix themselves.
+        _adopt_orphan_projects(user["id"], existing["id"])
+
         return {"status": "already_member", "company": existing}
 
     # Check for pending invites matching this email (case-insensitive — invites
@@ -707,6 +790,9 @@ async def auto_join_company(user: dict = Depends(get_current_user)):
         "user_id": user["id"],
         "role": invite.get("role", "member"),
     }).execute()
+
+    # Any projects created before joining (solo state) move with the user.
+    _adopt_orphan_projects(user["id"], invite["company_id"])
 
     # Mark invite as accepted
     supabase_admin.table("company_invites").update(
