@@ -445,7 +445,12 @@ async def delete_photo_slot(
 
 @router.delete("/{snag_id}", status_code=204)
 async def delete_snag(snag_id: str, user: dict = Depends(get_current_user)):
-    """Delete a snag and its photos."""
+    """Delete a snag and its photos.
+
+    Blocked once the snag's visit has an issued report: an issued register
+    is an evidential document — items keep their numbers and may only be
+    closed, never removed. (Deleting before first issue is fine and simply
+    renumbers.)"""
     snag = (
         supabase_admin.table("snags")
         .select("*, projects!inner(user_id)")
@@ -454,6 +459,24 @@ async def delete_snag(snag_id: str, user: dict = Depends(get_current_user)):
     )
     if not snag.data or snag.data[0]["projects"]["user_id"] != user["id"]:
         raise HTTPException(status_code=404, detail="Snag not found")
+
+    visit_id = snag.data[0].get("visit_id")
+    if visit_id:
+        issued = (
+            supabase_admin.table("report_issues")
+            .select("id")
+            .eq("visit_id", visit_id)
+            .limit(1)
+            .execute()
+        )
+        if issued.data:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "This visit's report has been issued — items can no longer "
+                    "be deleted, only closed."
+                ),
+            )
 
     # Delete all photos from storage
     for key in ["photo_path", "photo_path_2", "photo_path_3", "photo_path_4", "rectification_photo_path"]:
