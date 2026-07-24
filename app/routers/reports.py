@@ -510,11 +510,21 @@ async def _build_project_report_pdf(
 
     # Photos
     snags: list[dict] = []
-    photo_data: dict[str, list[bytes]] = {}
+    # Each entry is (bytes, exif_taken_at | None) so the PDF can caption
+    # photos with their true capture date ("date unavailable" when EXIF
+    # was absent). Slot order is preserved for regular photos; the
+    # rectification photo, if any, comes last.
+    photo_data: dict[str, list] = {}
+    _taken_key_for = {
+        "photo_path": "photo_taken_at",
+        "photo_path_2": "photo_taken_at_2",
+        "photo_path_3": "photo_taken_at_3",
+        "photo_path_4": "photo_taken_at_4",
+    }
     for s in snags_res.data:
         photo_url = None
         if include_photos:
-            photos_for_snag: list[bytes] = []
+            photos_for_snag: list = []
             for path_key in ["photo_path", "photo_path_2", "photo_path_3", "photo_path_4"]:
                 path = s.get(path_key)
                 if path:
@@ -526,7 +536,7 @@ async def _build_project_report_pdf(
                         if url:
                             img_bytes = await _download_photo(url)
                             if img_bytes:
-                                photos_for_snag.append(img_bytes)
+                                photos_for_snag.append((img_bytes, s.get(_taken_key_for[path_key])))
                     except Exception:
                         pass
 
@@ -538,7 +548,7 @@ async def _build_project_report_pdf(
                     if url:
                         img_bytes = await _download_photo(url)
                         if img_bytes:
-                            photos_for_snag.append(img_bytes)
+                            photos_for_snag.append((img_bytes, s.get("rectification_photo_taken_at")))
                 except Exception:
                     pass
 

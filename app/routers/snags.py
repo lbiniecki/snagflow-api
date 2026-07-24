@@ -9,6 +9,7 @@ from app.services.plan_enforcement import check_snag_limit
 from app.config import settings
 from typing import List, Optional
 from uuid import uuid4
+from datetime import datetime
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -21,6 +22,26 @@ MAX_PHOTOS_PER_SNAG = 4
 # this tuple also maps to the storage-path suffix (0 → "", 1 → "_2", etc.).
 _PHOTO_SLOTS = ("photo_path", "photo_path_2", "photo_path_3", "photo_path_4")
 _SLOT_SUFFIX = ("", "_2", "_3", "_4")
+# EXIF capture-date columns, slot-ordered to mirror _PHOTO_SLOTS. These are
+# write-once evidence fields: set at upload from the photo's own metadata,
+# never exposed through any update endpoint (SnagUpdate whitelist excludes
+# them by construction).
+_TAKEN_SLOTS = ("photo_taken_at", "photo_taken_at_2", "photo_taken_at_3", "photo_taken_at_4")
+
+
+def _parse_taken_at(value) -> "str | None":
+    """Validate a client-supplied EXIF capture timestamp.
+
+    EXIF times are naive local wall-clock; we store them as-is (timestamp
+    without tz). Anything unparseable becomes None — an absent date is
+    honest, a guessed one is not."""
+    if not value:
+        return None
+    v = str(value).strip().replace("Z", "")
+    try:
+        return datetime.fromisoformat(v).isoformat()
+    except ValueError:
+        return None
 
 
 # ─── Response model (replaces schemas.SnagResponse) ───────────
@@ -36,6 +57,9 @@ class SnagOut(BaseModel):
     photo_url: Optional[str] = None
     photo_urls: list[Optional[str]] = []  # 4-element list, slot-ordered; None for empty slots
     photo_count: int = 0  # number of photos currently attached (0..4)
+    # EXIF capture dates, slot-ordered like photo_urls; None = no metadata.
+    photo_taken_ats: list[Optional[str]] = []
+    rectification_photo_taken_at: Optional[str] = None
     created_at: str
     updated_at: str
 
@@ -92,6 +116,8 @@ def _row_to_snag(row: dict) -> SnagOut:
         photo_url=photo_urls[0],
         photo_urls=photo_urls,
         photo_count=photo_count,
+        photo_taken_ats=[row.get(k) for k in _TAKEN_SLOTS],
+        rectification_photo_taken_at=row.get("rectification_photo_taken_at"),
         created_at=row["created_at"],
         updated_at=row.get("updated_at", row["created_at"]),
     )
@@ -146,6 +172,10 @@ async def create_snag(
     photo2: Optional[UploadFile] = File(None),
     photo3: Optional[UploadFile] = File(None),
     photo4: Optional[UploadFile] = File(None),
+    photo_taken_at: Optional[str] = Form(None),
+    photo2_taken_at: Optional[str] = Form(None),
+    photo3_taken_at: Optional[str] = Form(None),
+    photo4_taken_at: Optional[str] = Form(None),
     user: dict = Depends(get_current_user),
 ):
     """
@@ -217,6 +247,11 @@ async def create_snag(
         "photo_path_2": photo_path_2,
         "photo_path_3": photo_path_3,
         "photo_path_4": photo_path_4,
+        # Capture dates only stored for slots that actually received a photo.
+        "photo_taken_at": _parse_taken_at(photo_taken_at) if photo_path else None,
+        "photo_taken_at_2": _parse_taken_at(photo2_taken_at) if photo_path_2 else None,
+        "photo_taken_at_3": _parse_taken_at(photo3_taken_at) if photo_path_3 else None,
+        "photo_taken_at_4": _parse_taken_at(photo4_taken_at) if photo_path_4 else None,
     }
     if visit_id:
         data["visit_id"] = visit_id
@@ -272,6 +307,10 @@ async def add_photos(
     photo2: Optional[UploadFile] = File(None),
     photo3: Optional[UploadFile] = File(None),
     photo4: Optional[UploadFile] = File(None),
+    photo_taken_at: Optional[str] = Form(None),
+    photo2_taken_at: Optional[str] = Form(None),
+    photo3_taken_at: Optional[str] = Form(None),
+    photo4_taken_at: Optional[str] = Form(None),
     user: dict = Depends(get_current_user),
 ):
     """
@@ -295,8 +334,16 @@ async def add_photos(
 
     row = snag.data[0]
 
-    # Collect uploaded files in caller order, ignoring empty slots
-    new_files = [f for f in (photo, photo2, photo3, photo4) if f and f.filename]
+    # Collect uploaded files in caller order, ignoring empty slots. Pair each
+    # file with its capture date BEFORE filtering so the two never misalign.
+    _pairs = [
+        (photo, photo_taken_at),
+        (photo2, photo2_taken_at),
+        (photo3, photo3_taken_at),
+        (photo4, photo4_taken_at),
+    ]
+    new_items = [(f, t) for f, t in _pairs if f and f.filename]
+    new_files = [f for f, _ in new_items]
     if not new_files:
         raise HTTPException(status_code=400, detail="No photos provided")
 
@@ -315,12 +362,15 @@ async def add_photos(
 
     # Upload into the first N empty slots, in order
     updates: dict = {}
-    for i, file in enumerate(new_files):
+    for i, (file, taken_at) in enumerate(new_items):
         slot_idx = empty_slots[i]
         column = _PHOTO_SLOTS[slot_idx]
         suffix = _SLOT_SUFFIX[slot_idx]
         path = await upload_photo(file, user["id"], snag_id, suffix)
         updates[column] = path
+        # Always set (possibly to None) so a stale date from a previously
+        # deleted photo can never attach itself to this new one.
+        updates[_TAKEN_SLOTS[slot_idx]] = _parse_taken_at(taken_at)
 
     res = (
         supabase_admin.table("snags")
@@ -380,10 +430,10 @@ async def delete_photo_slot(
     except Exception:
         pass
 
-    # Null out the slot in DB
+    # Null out the slot in DB — capture date travels with its photo
     res = (
         supabase_admin.table("snags")
-        .update({column: None})
+        .update({column: None, _TAKEN_SLOTS[slot_idx]: None})
         .eq("id", snag_id)
         .execute()
     )
@@ -421,6 +471,7 @@ async def delete_snag(snag_id: str, user: dict = Depends(get_current_user)):
 async def close_with_photo(
     snag_id: str,
     photo: UploadFile = File(...),
+    photo_taken_at: Optional[str] = Form(None),
     user: dict = Depends(get_current_user),
 ):
     """Close a snag with a rectification photo proving the fix."""
@@ -455,6 +506,7 @@ async def close_with_photo(
         .update({
             "status": "closed",
             "rectification_photo_path": file_path,
+            "rectification_photo_taken_at": _parse_taken_at(photo_taken_at),
         })
         .eq("id", snag_id)
         .execute()

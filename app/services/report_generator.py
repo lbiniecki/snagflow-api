@@ -693,12 +693,16 @@ class SiteVisitReport(FPDF):
 
         # ── Open Snags table ──
         if open_snags:
+            if self.get_y() > PAGE_H - 60:
+                self.add_page()
             self._section_title(f"Open Items ({len(open_snags)})")
             self._snag_table(open_snags, show_priority=True)
             self.ln(4)
 
         # ── Closed Snags table ──
         if closed_snags:
+            if self.get_y() > PAGE_H - 60:
+                self.add_page()
             self._section_title(f"Closed Items ({len(closed_snags)})")
             self._snag_table(closed_snags, show_priority=False)
 
@@ -727,11 +731,25 @@ class SiteVisitReport(FPDF):
         _draw_header()
         line_h = 4
 
-        for idx, snag in enumerate(snags_list):
-            if self.get_y() > PAGE_H - 35:
-                self.add_page()
-                _draw_header()
+        def _count_lines(text: str, cell_w: float) -> int:
+            """Exact number of lines multi_cell will render for `text` in `cell_w`."""
+            if not text:
+                return 1
+            try:
+                lines = self.multi_cell(
+                    cell_w, line_h, text, dry_run=True, output="LINES"
+                )
+                return max(1, len(lines))
+            except TypeError:
+                # Older fpdf2 without dry_run: conservative fallback that at
+                # least respects explicit newlines.
+                total = 0
+                for para in text.split("\n"):
+                    w = self.get_string_width(para)
+                    total += max(1, int(w / max(cell_w, 1)) + 1)
+                return max(1, total)
 
+        for idx, snag in enumerate(snags_list):
             note = snag.get("note", "")
             location = snag.get("location", "-") or "-"
             date_str = snag.get("created_at", "")[:10] if snag.get("created_at") else ""
@@ -742,13 +760,24 @@ class SiteVisitReport(FPDF):
             row.append(date_str)
             row.append(snag.get("status", "").upper())
 
-            # Calculate row height
+            # Calculate row height from exact wrapped line counts
             self.set_font("DejaVu" if self._use_unicode else "Helvetica", "", 8)
-            desc_lines = max(1, int(self.get_string_width(note) / max(col_w[1] - 4, 1)) + 1)
-            loc_lines = max(1, int(self.get_string_width(location) / max(col_w[2] - 4, 1)) + 1)
-            row_h = max(7, int(max(desc_lines, loc_lines) * line_h) + 2)
+            desc_lines = _count_lines(note, col_w[1] - 2)
+            loc_lines = _count_lines(location, col_w[2] - 2)
+            row_h = max(7, max(desc_lines, loc_lines) * line_h + 2)
+
+            # Page break AFTER height is known, so tall rows never overflow
+            if self.get_y() + row_h > PAGE_H - 25:
+                self.add_page()
+                _draw_header()
 
             y_row = self.get_y()
+
+            # Rows are placed manually; fpdf2's auto page break must never
+            # fire mid-cell (it scatters cells across pages). Disable while
+            # drawing this row, restore afterwards.
+            b_margin = self.b_margin
+            self.set_auto_page_break(False)
 
             for i, val in enumerate(row):
                 x = MARGIN + sum(col_w[:i])
@@ -765,6 +794,7 @@ class SiteVisitReport(FPDF):
                 else:
                     self.cell(col_w[i] - 2, row_h - 2, val)
 
+            self.set_auto_page_break(True, margin=b_margin)
             self.set_y(y_row + row_h)
 
     # ─── Item Pages (with photos) ───────────────────────────────
@@ -812,21 +842,45 @@ class SiteVisitReport(FPDF):
     # Shared helpers used by the per-mode renderers below
     # ───────────────────────────────────────────────────────────
 
-    def _resolve_photos(self, snag: Dict[str, Any], photo_data: Dict[str, Any]) -> List[bytes]:
-        """Normalise a snag's photo_data entry into a list of 0-4 byte blobs."""
+    def _resolve_photos(self, snag: Dict[str, Any], photo_data: Dict[str, Any]) -> List[tuple]:
+        """Normalise a snag's photo_data entry into 0-4 (bytes, taken_at) pairs.
+
+        Accepts both the new (bytes, taken_at) tuples and legacy bare bytes
+        (mapped to taken_at=None) so an old caller can never crash the PDF."""
         raw = photo_data.get(snag.get("id", ""))
         if raw is None:
             return []
         if isinstance(raw, (bytes, bytearray)):
-            return [bytes(raw)]
+            return [(bytes(raw), None)]
         if isinstance(raw, list):
-            return raw[:4]
+            out = []
+            for entry in raw[:4]:
+                if isinstance(entry, (bytes, bytearray)):
+                    out.append((bytes(entry), None))
+                elif isinstance(entry, tuple) and len(entry) == 2:
+                    out.append((bytes(entry[0]), entry[1]))
+            return out
         return []
+
+    @staticmethod
+    def _taken_label(taken) -> str:
+        """Caption fragment for a photo's EXIF capture date.
+
+        Honest by design: a missing/unparseable date reads "date unavailable"
+        rather than silently borrowing the upload date."""
+        if not taken:
+            return "date unavailable"
+        try:
+            dt = datetime.fromisoformat(str(taken).replace("Z", "").split("+")[0])
+            return f"taken {dt.strftime('%d/%m/%Y')}"
+        except (ValueError, TypeError):
+            return "date unavailable"
 
     def _count_landscape(self, photos_list: List[bytes]) -> int:
         """Return count of photos whose width > height. Unknowns treated as portrait."""
         n = 0
-        for p in photos_list:
+        for entry in photos_list:
+            p = entry[0] if isinstance(entry, tuple) else entry
             try:
                 pw, ph = self._get_image_size(p)
                 if pw and ph and pw > ph:
@@ -1069,11 +1123,11 @@ class SiteVisitReport(FPDF):
                 (MARGIN, grid_top),
                 (MARGIN + cell_w + cell_gap, grid_top),
             ]
-            for pi, p_bytes in enumerate(photos_page1):
+            for pi, (p_bytes, p_taken) in enumerate(photos_page1):
                 gx, gy = positions[pi]
                 self._render_photo_fit(
                     gx, gy, cell_w, photo_max_h,
-                    p_bytes, f"Photo {item_no}.{pi + 1}",
+                    p_bytes, f"Photo {item_no}.{pi + 1} \u2014 {self._taken_label(p_taken)}",
                 )
         else:
             self.set_xy(MARGIN, grid_top)
@@ -1100,11 +1154,11 @@ class SiteVisitReport(FPDF):
                 (MARGIN, cont_top),
                 (MARGIN + cell_w + cell_gap, cont_top),
             ]
-            for pi, p_bytes in enumerate(photos_page2):
+            for pi, (p_bytes, p_taken) in enumerate(photos_page2):
                 gx, gy = positions[pi]
                 self._render_photo_fit(
                     gx, gy, cell_w, cont_photo_max_h,
-                    p_bytes, f"Photo {item_no}.{pi + 3}",
+                    p_bytes, f"Photo {item_no}.{pi + 3} \u2014 {self._taken_label(p_taken)}",
                 )
 
 
@@ -1163,7 +1217,7 @@ class SiteVisitReport(FPDF):
         if photos_list:
             self._render_photo_fit(
                 MARGIN, photo_top, USABLE_W, photo_max_h,
-                photos_list[0], f"Photo {item_no}.1",
+                photos_list[0][0], f"Photo {item_no}.1 \u2014 {self._taken_label(photos_list[0][1])}",
             )
         else:
             self.set_xy(MARGIN, photo_top)
@@ -1176,7 +1230,7 @@ class SiteVisitReport(FPDF):
             self._render_rectification_block(MARGIN, page_bottom - rect_needed + 2, USABLE_W)
 
         # Continuation pages for photos 2-4
-        for pi, p_bytes in enumerate(photos_list[1:], start=2):
+        for pi, (p_bytes, p_taken) in enumerate(photos_list[1:], start=2):
             self.add_page(orientation="P")
             self._set_body(9)
             self.cell(0, 6, f"Item {item_no:02d} - continued", ln=True)
@@ -1185,7 +1239,7 @@ class SiteVisitReport(FPDF):
             cont_max_h = (PAGE_H - 25) - cont_top - 4
             self._render_photo_fit(
                 MARGIN, cont_top, USABLE_W, cont_max_h,
-                p_bytes, f"Photo {item_no}.{pi}",
+                p_bytes, f"Photo {item_no}.{pi} \u2014 {self._taken_label(p_taken)}",
             )
 
     # ───────────────────────────────────────────────────────────
@@ -1251,11 +1305,11 @@ class SiteVisitReport(FPDF):
                 (MARGIN, grid_top + cell_h + cell_gap),
                 (MARGIN + cell_w + cell_gap, grid_top + cell_h + cell_gap),
             ]
-            for pi, p_bytes in enumerate(photos_list[:4]):
+            for pi, (p_bytes, p_taken) in enumerate(photos_list[:4]):
                 gx, gy = grid_positions[pi]
                 self._render_photo_fit(
                     gx, gy, cell_w, photo_max_h,
-                    p_bytes, f"Photo {item_no}.{pi + 1}",
+                    p_bytes, f"Photo {item_no}.{pi + 1} \u2014 {self._taken_label(p_taken)}",
                 )
         else:
             self.set_xy(MARGIN, grid_top)
