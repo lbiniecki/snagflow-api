@@ -705,12 +705,19 @@ class SiteVisitReport(FPDF):
 
         self.set_y(y_start + 26)
 
+        # Item numbers must match the report body, which numbers ALL snags
+        # sequentially in snag_no order (Item 01..N). Restarting numbering
+        # per table made summary "#6 open" and body "Item 06 [CLOSED]" refer
+        # to different items — uncross-referenceable.
+        _sorted_all = sorted(self.snags, key=lambda s: s.get("snag_no", 0))
+        item_numbers = {id(s): i + 1 for i, s in enumerate(_sorted_all)}
+
         # ── Open Snags table ──
         if open_snags:
             if self.get_y() > PAGE_H - 60:
                 self.add_page()
             self._section_title(f"Open Items ({len(open_snags)})")
-            self._snag_table(open_snags, show_priority=True)
+            self._snag_table(open_snags, show_priority=True, item_numbers=item_numbers)
             self.ln(4)
 
         # ── Closed Snags table ──
@@ -718,9 +725,9 @@ class SiteVisitReport(FPDF):
             if self.get_y() > PAGE_H - 60:
                 self.add_page()
             self._section_title(f"Closed Items ({len(closed_snags)})")
-            self._snag_table(closed_snags, show_priority=False)
+            self._snag_table(closed_snags, show_priority=False, item_numbers=item_numbers)
 
-    def _snag_table(self, snags_list, show_priority=True):
+    def _snag_table(self, snags_list, show_priority=True, item_numbers=None):
         if show_priority:
             col_w = [10, 70, 40, 22, 22, 16]
             headers = ["#", "Description", "Location", "Priority", "Date", "Status"]
@@ -763,12 +770,16 @@ class SiteVisitReport(FPDF):
                     total += max(1, int(w / max(cell_w, 1)) + 1)
                 return max(1, total)
 
+        if item_numbers:
+            snags_list = sorted(snags_list, key=lambda s: item_numbers.get(id(s), 0))
+
         for idx, snag in enumerate(snags_list):
+            row_no = item_numbers.get(id(snag), idx + 1) if item_numbers else idx + 1
             note = snag.get("note", "")
             location = snag.get("location", "-") or "-"
             date_str = snag.get("created_at", "")[:10] if snag.get("created_at") else ""
 
-            row = [str(idx + 1), note, location]
+            row = [str(row_no), note, location]
             if show_priority:
                 row.append(snag.get("priority", "medium").upper())
             row.append(date_str)
